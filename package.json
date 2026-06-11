@@ -1,0 +1,29 @@
+{
+  "name": "cashflow-worker-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "d1:migrate": "wrangler d1 migrations apply cashflow_db",
+    "d1:migrate:local": "wrangler d1 migrations apply cashflow_db --local",
+    "d1:count:entries:local": "wrangler d1 execute cashflow_db --local --command \"SELECT COUNT(*) AS entries_count FROM cashflow_entries;\"",
+    "d1:count:entries:remote": "wrangler d1 execute cashflow_db --remote --command \"SELECT COUNT(*) AS entries_count FROM cashflow_entries;\"",
+    "d1:count:org-members:local": "wrangler d1 execute cashflow_db --local --command \"SELECT organization_id, COUNT(*) AS members FROM organization_members GROUP BY organization_id ORDER BY organization_id;\"",
+    "d1:count:org-members:remote": "wrangler d1 execute cashflow_db --remote --command \"SELECT organization_id, COUNT(*) AS members FROM organization_members GROUP BY organization_id ORDER BY organization_id;\"",
+    "test": "vitest --config tests/vitest.config.mts run",
+    "test:watch": "vitest --config tests/vitest.config.mts",
+    "import:rakuraku": "node scripts/import-rakuraku-csv.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.9.4"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.15.1",
+    "@cloudflare/workers-types": "^4.20260415.0",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.13.2"
+  }
+}

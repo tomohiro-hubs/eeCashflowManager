@@ -1,0 +1,110 @@
+PRAGMA foreign_keys = ON;
+
+-- cashflow_entries extension fields
+ALTER TABLE cashflow_entries ADD COLUMN account_name TEXT;
+ALTER TABLE cashflow_entries ADD COLUMN actual_transaction_date TEXT;
+ALTER TABLE cashflow_entries ADD COLUMN customer_name TEXT;
+ALTER TABLE cashflow_entries ADD COLUMN staff_name TEXT;
+
+-- Recreate triggers so updated_at touch and audit snapshot include the new columns.
+DROP TRIGGER IF EXISTS trg_entries_touch_updated_at;
+DROP TRIGGER IF EXISTS trg_entries_audit_insert;
+DROP TRIGGER IF EXISTS trg_entries_audit_update;
+DROP TRIGGER IF EXISTS trg_entries_audit_delete;
+
+CREATE TRIGGER IF NOT EXISTS trg_entries_touch_updated_at
+AFTER UPDATE OF title, amount, type, scheduled_date, order_index, note, deleted_at, account_name, actual_transaction_date, customer_name, staff_name ON cashflow_entries
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+  UPDATE cashflow_entries
+  SET updated_at = datetime('now')
+  WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entries_audit_insert
+AFTER INSERT ON cashflow_entries
+FOR EACH ROW
+BEGIN
+  INSERT INTO cashflow_entry_audits (entry_id, user_id, action, row_snapshot)
+  VALUES (
+    NEW.id,
+    NEW.user_id,
+    'INSERT',
+    json_object(
+      'id', NEW.id,
+      'user_id', NEW.user_id,
+      'title', NEW.title,
+      'amount', NEW.amount,
+      'type', NEW.type,
+      'scheduled_date', NEW.scheduled_date,
+      'order_index', NEW.order_index,
+      'note', NEW.note,
+      'account_name', NEW.account_name,
+      'actual_transaction_date', NEW.actual_transaction_date,
+      'customer_name', NEW.customer_name,
+      'staff_name', NEW.staff_name,
+      'created_at', NEW.created_at,
+      'updated_at', NEW.updated_at,
+      'deleted_at', NEW.deleted_at
+    )
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entries_audit_update
+AFTER UPDATE ON cashflow_entries
+FOR EACH ROW
+BEGIN
+  INSERT INTO cashflow_entry_audits (entry_id, user_id, action, row_snapshot)
+  VALUES (
+    NEW.id,
+    NEW.user_id,
+    'UPDATE',
+    json_object(
+      'id', NEW.id,
+      'user_id', NEW.user_id,
+      'title', NEW.title,
+      'amount', NEW.amount,
+      'type', NEW.type,
+      'scheduled_date', NEW.scheduled_date,
+      'order_index', NEW.order_index,
+      'note', NEW.note,
+      'account_name', NEW.account_name,
+      'actual_transaction_date', NEW.actual_transaction_date,
+      'customer_name', NEW.customer_name,
+      'staff_name', NEW.staff_name,
+      'created_at', NEW.created_at,
+      'updated_at', NEW.updated_at,
+      'deleted_at', NEW.deleted_at
+    )
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_entries_audit_delete
+BEFORE DELETE ON cashflow_entries
+FOR EACH ROW
+BEGIN
+  INSERT INTO cashflow_entry_audits (entry_id, user_id, action, row_snapshot)
+  VALUES (
+    OLD.id,
+    OLD.user_id,
+    'DELETE',
+    json_object(
+      'id', OLD.id,
+      'user_id', OLD.user_id,
+      'title', OLD.title,
+      'amount', OLD.amount,
+      'type', OLD.type,
+      'scheduled_date', OLD.scheduled_date,
+      'order_index', OLD.order_index,
+      'note', OLD.note,
+      'account_name', OLD.account_name,
+      'actual_transaction_date', OLD.actual_transaction_date,
+      'customer_name', OLD.customer_name,
+      'staff_name', OLD.staff_name,
+      'created_at', OLD.created_at,
+      'updated_at', OLD.updated_at,
+      'deleted_at', OLD.deleted_at
+    )
+  );
+END;
