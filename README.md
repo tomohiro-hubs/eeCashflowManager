@@ -141,7 +141,7 @@ npm run deploy
 - `created_at`: 発行時刻（UTC）
 
 安全な失効設計:
-- 検証条件は必ず `used_at IS NULL AND expires_at > datetime('now')` を同時に満たすこと
+- 集中条件は必ず `used_at IS NULL AND expires_at > datetime('now')` を同時に満たすこと
 - 再設定成功時は同一トークン行の `used_at=datetime('now')` を即時更新してワンタイム化
 - 平文トークンはDB保存しない（メール送信と照合はハッシュ化して実施）
 
