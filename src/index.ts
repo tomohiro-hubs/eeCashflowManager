@@ -1,5 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import iconv from 'iconv-lite';
+import { CASHFLOW_STATEMENT_COLUMNS, CASHFLOW_STATEMENT_ROWS } from './cashflowStatementData';
 
 type Env = {
   DB: D1Database;
@@ -23,6 +25,38 @@ const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_BLOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
 const ENTRY_LABEL_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
+const CF_CATEGORIES = [
+  '',
+  '現金売上',
+  '売掛金回収',
+  '未収入金・前受金入金',
+  'その他の収入',
+  '売電収入（西予発電所）',
+  '売電収入（府中発電所）',
+  '売電収入（茨城発電所）',
+  '現金仕入',
+  '買掛金支払',
+  '未払金・前渡金支払',
+  '人件費支出',
+  '家賃等',
+  '固定費',
+  '租税公課',
+  'その他の支出（社長）',
+  'その他の支出（UFJ）',
+  'その他の支出（木下）',
+  'その他の支出（その他）',
+  '固定性預金払戻し',
+  '銀行借入',
+  'E借入',
+  '売電事業分資金移動',
+  '設備収入（設備売却など）',
+  'その他の財務等収入',
+  '銀行借入返済',
+  '設備支出（固定資産投資）',
+  'その他の財務等支出',
+  '利息保証料支払',
+  'リース債務返済'
+] as const;
 
 const CSRF_EXEMPT_PATHS = new Set(['/login', '/register', '/forgot-password', '/reset-password']);
 const CSV_IMPORT_ERROR_CODES = {
@@ -265,6 +299,12 @@ app.get('/fiscal', async (c) => {
   return c.html(renderFiscalPage(user.email, user.isAdmin));
 });
 
+app.get('/cashflow-statement', async (c) => {
+  const user = c.get('user');
+  if (!user) return c.redirect('/login');
+  return c.html(renderCashflowStatementPage(user.email, user.isAdmin));
+});
+
 app.get('/audit', async (c) => {
   const user = c.get('user');
   if (!user) return c.redirect('/login');
@@ -349,11 +389,11 @@ app.get('/api/annual-expense-entries', async (c) => {
   const result = await c.env.DB.prepare(
     `SELECT id, scheduled_date, title, amount, note, type
      FROM cashflow_entries
-     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND type = 'expense' AND substr(scheduled_date, 1, 4) = ?
+     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND substr(scheduled_date, 1, 4) = ?
      ORDER BY scheduled_date ASC, order_index ASC, id ASC`
   )
     .bind(organizationId, year)
-    .all<{ id: number; scheduled_date: string; title: string; amount: number; note: string | null; type: 'expense' }>();
+    .all<{ id: number; scheduled_date: string; title: string; amount: number; note: string | null; type: 'income' | 'expense' }>();
 
   return c.json({ year, entries: result.results ?? [] });
 });
@@ -496,6 +536,8 @@ app.get('/api/audit/session-logs', async (c) => {
   if (!user.isAdmin) return c.json({ error: 'Forbidden' }, 403);
   const from = parseDateOnly(c.req.query('from'));
   const to = parseDateOnly(c.req.query('to'));
+  const fromUtc = toAuditUtcStart(from);
+  const toUtcExclusive = toAuditUtcEndExclusive(to);
   const email = normalizeEmail(String(c.req.query('email') ?? ''));
   if ((c.req.query('from') && !from) || (c.req.query('to') && !to)) {
     return c.json({ error: 'Invalid date. Use YYYY-MM-DD.' }, 400);
@@ -509,11 +551,11 @@ app.get('/api/audit/session-logs', async (c) => {
      JOIN users u ON u.id = l.user_id
      WHERE (? = '' OR lower(u.email) = ?)
        AND (? IS NULL OR login_at >= ?)
-       AND (? IS NULL OR login_at < datetime(?, '+1 day'))
+       AND (? IS NULL OR login_at < ?)
      ORDER BY l.login_at DESC
      LIMIT 500`
   )
-    .bind(email, email, from, from, to, to)
+    .bind(email, email, fromUtc, fromUtc, toUtcExclusive, toUtcExclusive)
     .all<{ login_at: string; logout_at: string | null; logout_reason: string | null; session_token_masked: string; user_email: string }>();
 
   return c.json({ logs: rows.results ?? [] });
@@ -525,6 +567,8 @@ app.get('/api/audit/operation-logs', async (c) => {
   if (!user.isAdmin) return c.json({ error: 'Forbidden' }, 403);
   const from = parseDateOnly(c.req.query('from'));
   const to = parseDateOnly(c.req.query('to'));
+  const fromUtc = toAuditUtcStart(from);
+  const toUtcExclusive = toAuditUtcEndExclusive(to);
   const action = String(c.req.query('action') ?? '').trim();
   const email = normalizeEmail(String(c.req.query('email') ?? ''));
   if ((c.req.query('from') && !from) || (c.req.query('to') && !to)) {
@@ -541,11 +585,11 @@ app.get('/api/audit/operation-logs', async (c) => {
      WHERE (? = '' OR lower(u.email) = ?)
        AND (? = '' OR o.action_type = ?)
        AND (? IS NULL OR o.created_at >= ?)
-       AND (? IS NULL OR o.created_at < datetime(?, '+1 day'))
+       AND (? IS NULL OR o.created_at < ?)
      ORDER BY o.created_at DESC
      LIMIT 1000`
   )
-    .bind(email, email, action, action, from, from, to, to)
+    .bind(email, email, action, action, fromUtc, fromUtc, toUtcExclusive, toUtcExclusive)
     .all<{ action_type: 'add' | 'edit' | 'delete'; target_type: string; target_id: number | null; detail: string | null; created_at: string; user_email: string }>();
 
   return c.json({ logs: rows.results ?? [] });
@@ -559,7 +603,7 @@ app.get('/api/entries', async (c) => {
   if (!year) return c.json({ error: 'Invalid year. Use YYYY.' }, 400);
 
   const result = await c.env.DB.prepare(
-    `SELECT id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, is_sample, is_completed, created_by_user_id, import_management_no
+    `SELECT id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no
      FROM cashflow_entries
      WHERE organization_id = ? AND substr(scheduled_date, 1, 4) = ? AND deleted_at IS NULL
      ORDER BY scheduled_date ASC, order_index ASC, id ASC`
@@ -644,6 +688,7 @@ app.post('/api/entries', async (c) => {
     customerName?: string;
     staffName?: string;
     labelColor?: string;
+    cfCategory?: string;
   }>(c);
   if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
 
@@ -653,6 +698,7 @@ app.post('/api/entries', async (c) => {
   const customerName = typeof body.customerName === 'string' ? body.customerName.trim() : '';
   const staffName = typeof body.staffName === 'string' ? body.staffName.trim() : '';
   const labelColor = typeof body.labelColor === 'string' ? body.labelColor.trim() : '';
+  const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
 
   const validatedInput = {
     title,
@@ -663,7 +709,8 @@ app.post('/api/entries', async (c) => {
     accountName,
     customerName,
     staffName,
-    labelColor
+    labelColor,
+    cfCategory
   };
   if (!isValidEntryInput(validatedInput)) {
     return c.json({ error: 'Invalid payload' }, 400);
@@ -682,8 +729,8 @@ app.post('/api/entries', async (c) => {
 
   await c.env.DB.prepare(
     `INSERT INTO cashflow_entries
-      (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, is_sample, created_by_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, created_by_user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
   )
     .bind(
       user.id,
@@ -699,6 +746,7 @@ app.post('/api/entries', async (c) => {
       validatedInput.customerName || null,
       validatedInput.staffName || null,
       validatedInput.labelColor,
+      validatedInput.cfCategory,
       user.id
     )
     .run();
@@ -725,95 +773,42 @@ app.post('/api/import/rakuraku', async (c) => {
   }
   const { user, organizationId } = auth;
 
-  const isD1ConstraintError = (error: unknown): boolean => {
-    const message = error instanceof Error ? error.message : String(error ?? '');
-    const normalized = message.toLowerCase();
-    return normalized.includes('constraint') || normalized.includes('unique');
-  };
-  const isD1BindLimitError = (error: unknown): boolean => {
-    const message = error instanceof Error ? error.message : String(error ?? '');
-    const normalized = message.toLowerCase();
-    return normalized.includes('too many sql variables') || normalized.includes('bind') && normalized.includes('too many');
-  };
-
-  let sourceFileName = 'browser_upload.csv';
-  let syncEntries = true;
-  const rowErrors: Array<{ rowNumber: number; errorCode: CsvImportErrorCode; message: string }> = [];
-  let incomingRows: Array<{
-    managementNo?: string;
-    projectName?: string;
-    expenseTotalInclTax?: number | null;
-    incomeTotalInclTax?: number | null;
-    customerName?: string;
-    scheduledDateRaw?: string;
-    scheduledDate?: string;
-  }> = [];
-  const errorResponse = (
-    status: 400 | 401 | 403 | 415 | 500,
-    errorCode: CsvImportErrorCode,
-    message: string,
-    extra: Record<string, unknown> = {}
-  ) => c.json({ ok: false, errorCode, error: message, message, ...extra }, status);
-
   try {
     const contentType = c.req.header('content-type') ?? '';
-    if (contentType.includes('multipart/form-data')) {
-      let form: Record<string, unknown>;
-      try {
-        form = await c.req.parseBody();
-      } catch (error) {
-        console.error('rakuraku import multipart parse failed', { userId: user.id, contentType, error });
-        return errorResponse(400, CSV_IMPORT_ERROR_CODES.multipartParseFailed, 'multipart/form-data の解析に失敗しました。CSVファイルを再選択して再実行してください。');
-      }
-      const file = form.file;
-      const syncRaw = String(form.syncEntries ?? 'true').toLowerCase();
-      syncEntries = syncRaw !== 'false' && syncRaw !== '0';
-      if (!(file instanceof File)) {
-        return errorResponse(400, CSV_IMPORT_ERROR_CODES.fileMissing, 'CSVファイルがありません。');
-      }
-      sourceFileName = String(file.name || sourceFileName).slice(0, 200);
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const text = decodeShiftJisLike(bytes);
-        incomingRows = parseRakurakuCsvText(text);
-      } catch (error) {
-        console.error('rakuraku import csv decode/parse failed', { userId: user.id, sourceFileName, error });
-        if (error instanceof CsvImportParseError) {
-          return errorResponse(400, error.code, error.message);
-        }
-        return errorResponse(400, CSV_IMPORT_ERROR_CODES.fileDecodeFailed, 'CSVファイルの解析に失敗しました。形式を確認してください。');
-      }
-    } else if (contentType.includes('application/json')) {
-      let body: {
-        sourceFileName?: string;
-        syncEntries?: boolean;
-        rows?: Array<{
-          managementNo?: string;
-          projectName?: string;
-          expenseTotalInclTax?: number | null;
-          incomeTotalInclTax?: number | null;
-          customerName?: string;
-          scheduledDateRaw?: string;
-          scheduledDate?: string;
-        }>;
-      } | null = null;
-      try {
-        body = await parseJsonBody(c);
-      } catch (error) {
-        console.error('rakuraku import invalid json body', { userId: user.id, error });
-        return errorResponse(400, CSV_IMPORT_ERROR_CODES.invalidJson, 'JSON ボディの解析に失敗しました。');
-      }
-      if (!body || !Array.isArray(body.rows)) {
-        return errorResponse(400, CSV_IMPORT_ERROR_CODES.invalidJson, 'JSON ボディの形式が不正です。');
-      }
-      sourceFileName = String(body.sourceFileName ?? sourceFileName).slice(0, 200);
-      syncEntries = Boolean(body.syncEntries);
-      incomingRows = body.rows;
-    } else {
-      return errorResponse(415, CSV_IMPORT_ERROR_CODES.unsupportedContentType, 'サポート対象外の Content-Type です。multipart/form-data または application/json を使用してください。');
+    if (!contentType.includes('multipart/form-data')) {
+      return c.json({ ok: false, error: 'Content-Type must be multipart/form-data' }, 415);
+    }
+    let form: Record<string, unknown>;
+    try {
+      form = await c.req.parseBody();
+    } catch (error) {
+      console.error('rakuraku import preview multipart parse failed', { userId: user.id, error });
+      return c.json({ ok: false, error: 'multipart/form-data の解析に失敗しました。' }, 400);
+    }
+    const file = form.file;
+    if (!(file instanceof File)) {
+      return c.json({ ok: false, error: 'CSVファイルがありません。' }, 400);
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const text = decodeShiftJisLike(bytes);
+    
+    // Parse Rakuraku CSV
+    let incomingRows: Array<{
+      managementNo?: string;
+      projectName?: string;
+      expenseTotalInclTax?: number | null;
+      incomeTotalInclTax?: number | null;
+      customerName?: string;
+      scheduledDateRaw?: string;
+      scheduledDate?: string;
+    }> = [];
+    try {
+      incomingRows = parseRakurakuCsvText(text);
+    } catch (error) {
+      console.error('rakuraku import csv parse failed', { userId: user.id, error });
+      return c.json({ ok: false, error: 'CSVファイルの解析に失敗しました。' }, 400);
     }
 
-    const batchId = `web_${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
     const preparedRows: Array<{
       rowNumber: number;
       managementNo: string;
@@ -852,17 +847,146 @@ app.post('/api/import/rakuraku', async (c) => {
     }
 
     if (preparedRows.length === 0) {
-      return errorResponse(400, CSV_IMPORT_ERROR_CODES.noImportableRows, '取り込み可能な行がありません。', { importedRows: 0, invalidRows });
+      return c.json({ ok: true, newEntries: [], diffEntries: [], invalidRows, message: '取り込み可能な行がありませんでした。' });
     }
 
-    // Always process all parsed rows so re-import can update existing entries.
-    const freshRows = preparedRows;
-    let duplicateRows = 0;
+    // 既存の同一managementNoのデータを取得する
+    const managementNos = [...new Set(preparedRows.map((r) => r.managementNo).filter((v) => v !== ''))];
+    const existingMap = new Map<string, { id: number; title: string; amount: number; scheduled_date: string; customer_name: string; type: 'income' | 'expense' }>();
+    if (managementNos.length > 0) {
+      const keyChunkSize = 80;
+      for (let i = 0; i < managementNos.length; i += keyChunkSize) {
+        const part = managementNos.slice(i, i + keyChunkSize);
+        const placeholders = part.map(() => '?').join(', ');
+        const rows = await c.env.DB.prepare(
+          `SELECT id, title, amount, type, scheduled_date, customer_name, import_management_no
+           FROM cashflow_entries
+           WHERE organization_id = ? AND deleted_at IS NULL AND import_management_no IN (${placeholders})`
+        ).bind(organizationId, ...part).all<{ id: number; title: string; amount: number; type: 'income' | 'expense'; scheduled_date: string; customer_name: string | null; import_management_no: string }>();
+        for (const row of rows.results ?? []) {
+          const key = `${String(row.import_management_no)}::${row.type}`;
+          existingMap.set(key, {
+            id: Number(row.id),
+            title: row.title || '',
+            amount: Number(row.amount || 0),
+            scheduled_date: row.scheduled_date || '',
+            customer_name: row.customer_name || '',
+            type: row.type
+          });
+        }
+      }
+    }
 
-    const monthSet = new Set(freshRows.map((r) => r.scheduledDate.slice(0, 7)));
+    const newEntries: Array<any> = [];
+    const diffEntries: Array<any> = [];
+
+    for (const row of preparedRows) {
+      const title = (row.projectName || row.managementNo || row.customerName || '楽々販売取込').slice(0, 120);
+      
+      const checkAndPush = (amount: number, type: 'income' | 'expense') => {
+        const key = `${row.managementNo}::${type}`;
+        const existing = existingMap.get(key);
+        if (!existing) {
+          // 新規
+          newEntries.push({
+            managementNo: row.managementNo,
+            type,
+            title,
+            amount,
+            scheduledDate: row.scheduledDate,
+            customerName: row.customerName
+          });
+        } else {
+          // 比較 (件名「title」は文字コード起因の文字化け・誤検出を避けるため、比較検証の対象から除外します)
+          const hasDiff = 
+            existing.amount !== amount ||
+            existing.scheduled_date !== row.scheduledDate ||
+            existing.customer_name !== row.customerName;
+          
+          if (hasDiff) {
+            diffEntries.push({
+              id: existing.id,
+              managementNo: row.managementNo,
+              type,
+              // 上書き更新時にDBの既存の綺麗な件名が文字化け文字で上書きされないよう、
+              // 新しい件名（new）にも既存の件名（existing.title）をそのまま使用します
+              title: { old: existing.title, new: existing.title },
+              amount: { old: existing.amount, new: amount },
+              scheduledDate: { old: existing.scheduled_date, new: row.scheduledDate },
+              customerName: { old: existing.customer_name, new: row.customerName }
+            });
+          }
+        }
+      };
+
+      if (row.income !== null && row.income > 0) {
+        checkAndPush(row.income, 'income');
+      }
+      if (row.expense !== null && row.expense > 0) {
+        checkAndPush(row.expense, 'expense');
+      }
+    }
+
+    return c.json({
+      ok: true,
+      newEntries,
+      diffEntries,
+      invalidRows,
+      totalRows: preparedRows.length
+    });
+  } catch (error) {
+    console.error('rakuraku import preview failed', { userId: user.id, error });
+    return c.json({ ok: false, error: 'CSV解析中にエラーが発生しました。' }, 500);
+  }
+});
+
+app.post('/api/import/rakuraku/commit', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) {
+    const status = auth.status === 401 ? 401 : 403;
+    const message = status === 401 ? 'Unauthorized' : 'Forbidden';
+    const errorCode = status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN';
+    return c.json({ ok: false, errorCode, error: message, message }, status);
+  }
+  const { user, organizationId } = auth;
+
+  try {
+    const body = await parseJsonBody<{
+      newEntries?: Array<{
+        managementNo: string;
+        type: 'income' | 'expense';
+        title: string;
+        amount: number;
+        scheduledDate: string;
+        customerName: string;
+      }>;
+      updatedEntries?: Array<{
+        id: number;
+        managementNo: string;
+        type: 'income' | 'expense';
+        title: string;
+        amount: number;
+        scheduledDate: string;
+        customerName: string;
+      }>;
+    }>(c);
+
+    if (!body) {
+      return c.json({ ok: false, error: 'リクエストボディがありません。' }, 400);
+    }
+
+    const { newEntries = [], updatedEntries = [] } = body;
+    if (newEntries.length === 0 && updatedEntries.length === 0) {
+      return c.json({ ok: true, insertedCount: 0, updatedCount: 0, message: '適用するデータがありません。' });
+    }
+
+    const monthSet = new Set(newEntries.map((r) => r.scheduledDate.slice(0, 7)));
+    for (const r of updatedEntries) {
+      monthSet.add(r.scheduledDate.slice(0, 7));
+    }
     const monthList = [...monthSet];
     const orderMap = new Map<string, number>();
-    if (syncEntries && monthList.length > 0) {
+    if (monthList.length > 0) {
       for (const m of monthList) orderMap.set(m, 0);
       const monthChunkSize = 80;
       for (let i = 0; i < monthList.length; i += monthChunkSize) {
@@ -882,238 +1006,366 @@ app.post('/api/import/rakuraku', async (c) => {
       }
     }
 
-    const managementNos = [...new Set(freshRows.map((r) => r.managementNo.trim()).filter((v) => v !== ''))];
-    const existingByKey = new Map<string, { id: number; order_index: number; type: 'income' | 'expense' }>();
-    if (syncEntries && managementNos.length > 0) {
-      const keyChunkSize = 80;
-      for (let i = 0; i < managementNos.length; i += keyChunkSize) {
-        const part = managementNos.slice(i, i + keyChunkSize);
-        const placeholders = part.map(() => '?').join(', ');
-        const existingEntries = await c.env.DB.prepare(
-          `SELECT id, import_management_no, type, order_index
-           FROM cashflow_entries
-           WHERE organization_id = ? AND deleted_at IS NULL AND import_management_no IN (${placeholders})`
-        ).bind(organizationId, ...part).all<{ id: number; import_management_no: string; type: 'income' | 'expense'; order_index: number }>();
-        for (const row of existingEntries.results ?? []) {
-          const key = `${String(row.import_management_no)}::${row.type}`;
-          if (!existingByKey.has(key)) {
-            existingByKey.set(key, { id: Number(row.id), order_index: Number(row.order_index ?? 0), type: row.type });
-          }
-        }
-      }
-    }
+    const statements: D1PreparedStatement[] = [];
+    const sourceFileName = 'rakuraku_import.csv';
+    const batchId = `web_${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
 
-    const rowGroups: Array<{ rowNumber: number; statements: D1PreparedStatement[]; entryCount: number; updatedCount: number }> = [];
-    for (const row of freshRows) {
-      const statements: D1PreparedStatement[] = [];
-      let entryCount = 0;
-      let updatedCount = 0;
+    // 1. UPDATE処理の登録
+    let updatedCount = 0;
+    for (const row of updatedEntries) {
       statements.push(
         c.env.DB.prepare(
-          `INSERT OR IGNORE INTO rakuraku_cashflow_import_rows
-            (user_id, import_batch_id, source_file_name, row_number, management_no, project_name, expense_total_incl_tax, income_total_incl_tax, customer_name, scheduled_date, scheduled_date_raw)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `UPDATE cashflow_entries
+           SET title = ?, amount = ?, scheduled_date = ?, customer_name = ?, updated_at = datetime('now'),
+               import_source_file_name = ?, import_batch_id = ?
+           WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
         ).bind(
-          user.id,
-          batchId,
-          sourceFileName,
-          row.rowNumber,
-          row.managementNo || null,
-          row.projectName || null,
-          row.expense,
-          row.income,
-          row.customerName || null,
+          row.title,
+          row.amount,
           row.scheduledDate,
-          row.scheduledDateRaw || null
+          row.customerName || null,
+          sourceFileName,
+          batchId,
+          row.id,
+          organizationId
         )
       );
-
-      if (syncEntries) {
-        const month = row.scheduledDate.slice(0, 7);
-        let nextOrder = Number(orderMap.get(month) ?? 0);
-        const title = (row.projectName || row.managementNo || row.customerName || '楽々販売取込').slice(0, 120);
-        if (row.income !== null && row.income > 0) {
-          const managementNo = row.managementNo.trim();
-          const existingKey = managementNo ? `${managementNo}::income` : '';
-          const existing = existingKey ? existingByKey.get(existingKey) : undefined;
-          if (existing) {
-            statements.push(
-              c.env.DB.prepare(
-                `UPDATE cashflow_entries
-                 SET title = ?, amount = ?, scheduled_date = ?, customer_name = ?, updated_at = datetime('now'),
-                     import_source_file_name = ?, import_batch_id = ?
-                 WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
-              ).bind(
-                title,
-                row.income,
-                row.scheduledDate,
-                row.customerName || null,
-                sourceFileName,
-                batchId,
-                existing.id,
-                organizationId
-              )
-            );
-            updatedCount += 1;
-          } else {
-            nextOrder += 1;
-            statements.push(
-              c.env.DB.prepare(
-                `INSERT INTO cashflow_entries
-                  (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, is_sample, is_completed, created_by_user_id, import_source_file_name, import_management_no, import_batch_id)
-                 VALUES (?, ?, ?, ?, 'income', ?, ?, NULL, NULL, NULL, ?, NULL, '', 0, 0, ?, ?, ?, ?)`
-              ).bind(
-                user.id,
-                organizationId,
-                title,
-                row.income,
-                row.scheduledDate,
-                nextOrder,
-                row.customerName || null,
-                user.id,
-                sourceFileName,
-                row.managementNo || null,
-                batchId
-              )
-            );
-            entryCount += 1;
-            if (existingKey) existingByKey.set(existingKey, { id: -1, order_index: nextOrder, type: 'income' });
-          }
-        }
-        if (row.expense !== null && row.expense > 0) {
-          const managementNo = row.managementNo.trim();
-          const existingKey = managementNo ? `${managementNo}::expense` : '';
-          const existing = existingKey ? existingByKey.get(existingKey) : undefined;
-          if (existing) {
-            statements.push(
-              c.env.DB.prepare(
-                `UPDATE cashflow_entries
-                 SET title = ?, amount = ?, scheduled_date = ?, customer_name = ?, updated_at = datetime('now'),
-                     import_source_file_name = ?, import_batch_id = ?
-                 WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
-              ).bind(
-                title,
-                row.expense,
-                row.scheduledDate,
-                row.customerName || null,
-                sourceFileName,
-                batchId,
-                existing.id,
-                organizationId
-              )
-            );
-            updatedCount += 1;
-          } else {
-            nextOrder += 1;
-            statements.push(
-              c.env.DB.prepare(
-                `INSERT INTO cashflow_entries
-                  (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, is_sample, is_completed, created_by_user_id, import_source_file_name, import_management_no, import_batch_id)
-                 VALUES (?, ?, ?, ?, 'expense', ?, ?, NULL, NULL, NULL, ?, NULL, '', 0, 0, ?, ?, ?, ?)`
-              ).bind(
-                user.id,
-                organizationId,
-                title,
-                row.expense,
-                row.scheduledDate,
-                nextOrder,
-                row.customerName || null,
-                user.id,
-                sourceFileName,
-                row.managementNo || null,
-                batchId
-              )
-            );
-            entryCount += 1;
-            if (existingKey) existingByKey.set(existingKey, { id: -1, order_index: nextOrder, type: 'expense' });
-          }
-        }
-        orderMap.set(month, nextOrder);
-      }
-      rowGroups.push({ rowNumber: row.rowNumber, statements, entryCount, updatedCount });
+      updatedCount += 1;
     }
 
-    let importedRows = 0;
-    let insertedEntries = 0;
-    let updatedEntries = 0;
-    let failedRows = 0;
-    const writeChunkSize = 40;
-    for (let i = 0; i < rowGroups.length; i += writeChunkSize) {
-      const chunk = rowGroups.slice(i, i + writeChunkSize);
-      const flattened = chunk.flatMap((g) => g.statements);
-      try {
-        await c.env.DB.batch(flattened);
-        importedRows += chunk.length;
-        insertedEntries += chunk.reduce((sum, g) => sum + g.entryCount, 0);
-        updatedEntries += chunk.reduce((sum, g) => sum + g.updatedCount, 0);
-      } catch (error) {
-        const mode = isD1ConstraintError(error) ? 'constraint' : 'general';
-        console.error('rakuraku import chunk failed fallback to row-by-row', {
-          userId: user.id,
+    // 2. INSERT処理の登録
+    let insertedCount = 0;
+    for (const row of newEntries) {
+      const month = row.scheduledDate.slice(0, 7);
+      let nextOrder = Number(orderMap.get(month) ?? 0);
+      nextOrder += 1;
+      orderMap.set(month, nextOrder);
+
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO cashflow_entries
+            (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
+             actual_transaction_date, customer_name, staff_name, label_color, is_sample, is_completed,
+             created_by_user_id, import_source_file_name, import_management_no, import_batch_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, '', 0, 0, ?, ?, ?, ?)`
+        ).bind(
+          user.id,
+          organizationId,
+          row.title,
+          row.amount,
+          row.type,
+          row.scheduledDate,
+          nextOrder,
+          row.customerName || null,
+          user.id,
           sourceFileName,
-          batchId,
-          chunkRows: chunk.length,
-          mode,
-          error
-        });
-        for (const group of chunk) {
-          try {
-            await c.env.DB.batch(group.statements);
-            importedRows += 1;
-            insertedEntries += group.entryCount;
-            updatedEntries += group.updatedCount;
-          } catch (rowError) {
-            if (isD1ConstraintError(rowError)) {
-              duplicateRows += 1;
-            } else {
-              failedRows += 1;
-              rowErrors.push({
-                rowNumber: group.rowNumber,
-                errorCode: CSV_IMPORT_ERROR_CODES.rowDbWriteFailed,
-                message: 'DB書き込みに失敗しました。'
-              });
-            }
-            console.error('rakuraku import row failed in non-constraint fallback', {
-              userId: user.id,
-              sourceFileName,
-              batchId,
-              rowNumber: group.rowNumber,
-              error: rowError
-            });
-          }
-        }
+          row.managementNo || null,
+          batchId
+        )
+      );
+      insertedCount += 1;
+    }
+
+    if (statements.length > 0) {
+      const writeChunkSize = 40;
+      for (let i = 0; i < statements.length; i += writeChunkSize) {
+        const chunk = statements.slice(i, i + writeChunkSize);
+        await c.env.DB.batch(chunk);
       }
     }
 
-    const ok = importedRows > 0 || duplicateRows > 0;
     return c.json({
       ok: true,
-      importedRows,
-      invalidRows,
-      duplicateRows,
-      failedRows,
-      rowErrors: rowErrors.slice(0, 50),
-      insertedEntries,
-      updatedEntries,
-      batchId,
-      message: ok
-        ? (failedRows > 0 ? `一部失敗 ${failedRows} 件をスキップして取り込みました。` : '取り込みが完了しました。')
-        : '取り込み対象がありませんでした。'
+      insertedCount,
+      updatedCount,
+      message: 'インポート適用が完了しました。'
     });
   } catch (error) {
-    if (isD1BindLimitError(error)) {
-      return errorResponse(
-        400,
-        CSV_IMPORT_ERROR_CODES.queryBindLimitExceeded,
-        'CSV件数が多くクエリ上限を超えました。ファイルを分割して再実行してください。'
-      );
+    console.error('rakuraku import commit failed', { userId: user.id, error });
+    return c.json({ ok: false, error: 'インポート確定処理中にエラーが発生しました。' }, 500);
+  }
+});
+
+app.post('/api/import/cashflow', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) {
+    const status = auth.status === 401 ? 401 : 403;
+    const message = status === 401 ? 'Unauthorized' : 'Forbidden';
+    const errorCode = status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN';
+    return c.json({ ok: false, errorCode, error: message, message }, status);
+  }
+  const { user, organizationId } = auth;
+
+  try {
+    const contentType = c.req.header('content-type') ?? '';
+    if (!contentType.includes('multipart/form-data')) {
+      return c.json({ ok: false, error: 'Content-Type must be multipart/form-data' }, 415);
     }
-    console.error('rakuraku import failed', {
-      userId: user.id,
-      sourceFileName,
-      error
+    let form: Record<string, unknown>;
+    try {
+      form = await c.req.parseBody();
+    } catch (error) {
+      console.error('cashflow import multipart parse failed', { userId: user.id, error });
+      return c.json({ ok: false, error: 'multipart/form-data の解析に失敗しました。' }, 400);
+    }
+    const file = form.file;
+    if (!(file instanceof File)) {
+      return c.json({ ok: false, error: 'CSVファイルがありません。' }, 400);
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const text = decodeShiftJisLike(bytes);
+    
+    // Parse CSV lines
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter((v) => v.trim() !== '');
+    if (lines.length === 0) {
+      return c.json({ ok: false, error: 'CSVファイルが空です。' }, 400);
+    }
+    if (lines.length === 1) {
+      return c.json({ ok: false, error: 'CSVデータ行がありません。' }, 400);
+    }
+
+    const header = parseCsvLineSimple(lines[0].replace(/^\uFEFF/, ''));
+    const idx = {
+      id: header.indexOf('ID'),
+      scheduledDate: header.indexOf('予定日'),
+      type: header.indexOf('区分'),
+      title: header.indexOf('件名'),
+      amount: header.indexOf('金額'),
+      note: header.indexOf('メモ'),
+      actualDate: header.indexOf('入出金日'),
+      customerName: header.indexOf('顧客名'),
+      staffName: header.indexOf('担当社員名'),
+      completed: header.indexOf('完了状態'),
+      labelColor: header.indexOf('ラベル'),
+      managementNo: header.indexOf('管理番号')
+    };
+
+    // 予定日, 区分, 件名, 金額 は必須項目
+    if (idx.scheduledDate < 0 || idx.type < 0 || idx.title < 0 || idx.amount < 0) {
+      return c.json({ ok: false, error: 'CSVヘッダーに必要な項目（予定日, 区分, 件名, 金額）が含まれていません。' }, 400);
+    }
+
+    const parsedRows: Array<{
+      id: string;
+      scheduledDate: string;
+      type: 'income' | 'expense';
+      title: string;
+      amount: number;
+      note: string;
+      actualDate: string;
+      customerName: string;
+      staffName: string;
+      isCompleted: number;
+      labelColor: string;
+      managementNo: string;
+      rowNum: number;
+    }> = [];
+
+    let failedRows = 0;
+    const rowErrors: Array<{ rowNumber: number; message: string }> = [];
+
+    for (let i = 1; i < lines.length; i += 1) {
+      const cols = parseCsvLineSimple(lines[i]);
+      const rawId = idx.id >= 0 ? String(cols[idx.id] ?? '').trim() : '';
+      const rawScheduledDate = String(cols[idx.scheduledDate] ?? '').trim();
+      const rawType = String(cols[idx.type] ?? '').trim();
+      const rawTitle = String(cols[idx.title] ?? '').trim();
+      const rawAmountVal = String(cols[idx.amount] ?? '').replaceAll(',', '').trim();
+      const rawAmount = Number(rawAmountVal);
+      const rawNote = idx.note >= 0 ? String(cols[idx.note] ?? '').trim() : '';
+      const rawActualDate = idx.actualDate >= 0 ? String(cols[idx.actualDate] ?? '').trim() : '';
+      const rawCustomerName = idx.customerName >= 0 ? String(cols[idx.customerName] ?? '').trim() : '';
+      const rawStaffName = idx.staffName >= 0 ? String(cols[idx.staffName] ?? '').trim() : '';
+      const rawCompleted = idx.completed >= 0 ? String(cols[idx.completed] ?? '').trim() : '';
+      const rawLabelColor = idx.labelColor >= 0 ? String(cols[idx.labelColor] ?? '').trim() : '';
+      const rawManagementNo = idx.managementNo >= 0 ? String(cols[idx.managementNo] ?? '').trim() : '';
+
+      const scheduledDate = parseSlashOrIsoDate(rawScheduledDate);
+      if (!scheduledDate) {
+        rowErrors.push({ rowNumber: i + 1, message: '予定日の日付形式が正しくありません。' });
+        failedRows += 1;
+        continue;
+      }
+      let type: 'income' | 'expense';
+      if (rawType === '入金') {
+        type = 'income';
+      } else if (rawType === '出金') {
+        type = 'expense';
+      } else {
+        rowErrors.push({ rowNumber: i + 1, message: '区分は「入金」または「出金」で入力してください。' });
+        failedRows += 1;
+        continue;
+      }
+
+      if (!rawTitle) {
+        rowErrors.push({ rowNumber: i + 1, message: '件名が入力されていません。' });
+        failedRows += 1;
+        continue;
+      }
+
+      if (rawAmountVal === '' || isNaN(rawAmount) || rawAmount < 0) {
+        rowErrors.push({ rowNumber: i + 1, message: '金額が正しくありません（1以上の整数）。' });
+        failedRows += 1;
+        continue;
+      }
+
+      const isCompleted = rawCompleted === '完了' ? 1 : 0;
+      const actualDate = parseSlashOrIsoDate(rawActualDate) || null;
+
+      parsedRows.push({
+        id: rawId,
+        scheduledDate,
+        type,
+        title: rawTitle.slice(0, 120),
+        amount: rawAmount,
+        note: rawNote || '',
+        actualDate: actualDate || '',
+        customerName: rawCustomerName || '',
+        staffName: rawStaffName || '',
+        isCompleted,
+        labelColor: rawLabelColor || '',
+        managementNo: rawManagementNo || '',
+        rowNum: i + 1
+      });
+    }
+
+    // 月ごとのorder_indexの初期値を準備
+    const monthSet = new Set(parsedRows.filter(r => !r.id).map(r => r.scheduledDate.slice(0, 7)));
+    const monthList = [...monthSet];
+    const orderMap = new Map<string, number>();
+    if (monthList.length > 0) {
+      for (const m of monthList) orderMap.set(m, 0);
+      const monthChunkSize = 80;
+      for (let i = 0; i < monthList.length; i += monthChunkSize) {
+        const chunk = monthList.slice(i, i + monthChunkSize);
+        const monthPlaceholders = chunk.map(() => '?').join(', ');
+        const maxRows = await c.env.DB.prepare(
+          `SELECT substr(scheduled_date, 1, 7) as month, COALESCE(MAX(order_index), 0) as max_order
+           FROM cashflow_entries
+           WHERE organization_id = ? AND deleted_at IS NULL AND substr(scheduled_date, 1, 7) IN (${monthPlaceholders})
+           GROUP BY substr(scheduled_date, 1, 7)`
+        )
+          .bind(organizationId, ...chunk)
+          .all<{ month: string; max_order: number }>();
+        for (const row of maxRows.results ?? []) {
+          orderMap.set(row.month, Number(row.max_order ?? 0));
+        }
+      }
+    }
+
+    // 指定されたIDがこの組織に属しているか確認
+    const idsToCheck = parsedRows.map(r => Number(r.id)).filter(id => !isNaN(id) && id > 0);
+    const existingIds = new Set<number>();
+    if (idsToCheck.length > 0) {
+      const idChunkSize = 80;
+      for (let i = 0; i < idsToCheck.length; i += idChunkSize) {
+        const chunk = idsToCheck.slice(i, i + idChunkSize);
+        const idPlaceholders = chunk.map(() => '?').join(', ');
+        const rows = await c.env.DB.prepare(
+          `SELECT id FROM cashflow_entries WHERE organization_id = ? AND deleted_at IS NULL AND id IN (${idPlaceholders})`
+        ).bind(organizationId, ...chunk).all<{ id: number }>();
+        for (const r of rows.results ?? []) {
+          existingIds.add(Number(r.id));
+        }
+      }
+    }
+
+    const statements: D1PreparedStatement[] = [];
+    let insertedEntries = 0;
+    let updatedEntries = 0;
+
+    for (const row of parsedRows) {
+      const idNum = Number(row.id);
+      if (row.id) {
+        if (isNaN(idNum) || idNum <= 0) {
+          rowErrors.push({ rowNumber: row.rowNum, message: `指定されたID（${row.id}）が不正です。` });
+          failedRows += 1;
+          continue;
+        }
+        if (!existingIds.has(idNum)) {
+          rowErrors.push({ rowNumber: row.rowNum, message: `指定されたID（${row.id}）が存在しないか、更新権限がありません。` });
+          failedRows += 1;
+          continue;
+        }
+
+        // UPDATE
+        statements.push(
+          c.env.DB.prepare(
+            `UPDATE cashflow_entries
+             SET scheduled_date = ?, type = ?, title = ?, amount = ?, note = ?, actual_transaction_date = ?,
+                 customer_name = ?, staff_name = ?, is_completed = ?, label_color = ?, import_management_no = ?,
+                 updated_at = datetime('now')
+             WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
+          ).bind(
+            row.scheduledDate,
+            row.type,
+            row.title,
+            row.amount,
+            row.note || null,
+            row.actualDate || null,
+            row.customerName || null,
+            row.staffName || null,
+            row.isCompleted,
+            row.labelColor || '',
+            row.managementNo || null,
+            idNum,
+            organizationId
+          )
+        );
+        updatedEntries += 1;
+      } else {
+        // INSERT
+        const month = row.scheduledDate.slice(0, 7);
+        let nextOrder = Number(orderMap.get(month) ?? 0);
+        nextOrder += 1;
+        orderMap.set(month, nextOrder);
+
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO cashflow_entries
+              (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
+               actual_transaction_date, customer_name, staff_name, label_color, is_sample, is_completed, created_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)`
+          ).bind(
+            user.id,
+            organizationId,
+            row.title,
+            row.amount,
+            row.type,
+            row.scheduledDate,
+            nextOrder,
+            row.note || null,
+            row.actualDate || null,
+            row.customerName || null,
+            row.staffName || null,
+            row.labelColor || '',
+            row.isCompleted,
+            user.id
+          )
+        );
+        insertedEntries += 1;
+      }
+    }
+
+    if (statements.length > 0) {
+      const writeChunkSize = 40;
+      for (let i = 0; i < statements.length; i += writeChunkSize) {
+        const chunk = statements.slice(i, i + writeChunkSize);
+        await c.env.DB.batch(chunk);
+      }
+    }
+
+    return c.json({
+      ok: true,
+      insertedEntries,
+      updatedEntries,
+      failedRows,
+      rowErrors,
+      message: 'インポートが完了しました。'
     });
-    return errorResponse(500, CSV_IMPORT_ERROR_CODES.internalError, 'CSV取り込み中にエラーが発生しました。時間をおいて再実行してください。');
+  } catch (error) {
+    console.error('cashflow import failed', { userId: user.id, error });
+    return c.json({ ok: false, error: 'CSV取り込み中にエラーが発生しました。' }, 500);
   }
 });
 
@@ -1497,6 +1749,36 @@ app.post('/api/entries/:id/color', async (c) => {
   return c.json({ ok: true, labelColor });
 });
 
+app.post('/api/entries/:id/cf-category', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { user, organizationId } = auth;
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid id' }, 400);
+
+  const body = await parseJsonBody<{ cfCategory?: string }>(c);
+  if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
+  const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
+  const allowedCategories = new Set<string>(CF_CATEGORIES);
+  if (!allowedCategories.has(cfCategory)) return c.json({ error: 'Invalid cf category' }, 400);
+
+  const result = await c.env.DB.prepare(
+    `UPDATE cashflow_entries
+     SET cf_category = ?, updated_at = datetime('now')
+     WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
+  )
+    .bind(cfCategory, id, organizationId)
+    .run();
+  if ((result.meta?.changes ?? 0) < 1) return c.json({ error: 'Entry not found' }, 404);
+
+  await c.env.DB.prepare(
+    `INSERT INTO user_operation_logs (user_id, action_type, target_type, target_id, detail)
+     VALUES (?, 'edit', 'cashflow_entry', ?, ?)`
+  ).bind(user.id, id, JSON.stringify({ cf_category: cfCategory })).run();
+
+  return c.json({ ok: true, cfCategory });
+});
+
 app.post('/api/entries/bulk', async (c) => {
   const auth = requireOrganizationContext(c);
   if (auth instanceof Response) return auth;
@@ -1772,6 +2054,99 @@ function renderAppPage(email: string, isAdmin: boolean) {
       .summary { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
     }
+
+    /* CSVヘルプモーダル用スタイル */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.45);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+    .modal-box {
+      background: #fff;
+      padding: 24px;
+      border-radius: 12px;
+      max-width: 640px;
+      width: 90%;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      position: relative;
+    }
+    .modal-close {
+      position: absolute;
+      top: 14px;
+      right: 18px;
+      font-size: 26px;
+      cursor: pointer;
+      color: #888;
+      line-height: 1;
+    }
+    .modal-close:hover {
+      color: #333;
+    }
+    /* ヘルプアイコンのスタイル */
+    .help-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #cbd5e1;
+      color: #334155;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+      margin-left: 6px;
+      border: none;
+      vertical-align: middle;
+      padding: 0;
+      line-height: 20px;
+      font-family: inherit;
+    }
+    .help-icon:hover {
+      background: #94a3b8;
+      color: #0f172a;
+    }
+
+    /* 楽楽販売差分モーダル用スタイル */
+    .diff-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 10px;
+      background: #fff;
+    }
+    .diff-table th, .diff-table td {
+      padding: 8px;
+      border: 1px solid var(--line);
+      vertical-align: middle;
+      text-align: left;
+    }
+    .diff-old {
+      color: var(--expense);
+      text-decoration: line-through;
+      background-color: #fdf2f2;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    .diff-new {
+      color: var(--income);
+      font-weight: bold;
+      background-color: #f0fdf4;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    .diff-same {
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -1796,6 +2171,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       </div>
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
+      <a href="/cashflow-statement" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">資金繰り表</a>
       <a href="/fiscal" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">年間サマリー</a>
       ${isAdmin ? '<a href="/audit" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">監査ログ</a>' : ''}
       <form method="post" action="/logout" style="display:inline-flex;">
@@ -1824,13 +2200,23 @@ function renderAppPage(email: string, isAdmin: boolean) {
 
   <section class="panel">
     <div class="topline">
-      <strong>年間出金データ（明細）</strong>
-      <span class="muted">選択中の年の確定済み出金データを表示します。残高は0起点で計算します。</span>
+      <strong>資金繰り表</strong>
+      <span class="muted">Excelの資金繰り表をWebで確認できるページです。今後この表に仕分け区分ごとの集計を接続します。</span>
+    </div>
+    <div class="toolbar">
+      <a href="/cashflow-statement" class="primary" style="display:inline-block; padding:9px 12px; text-decoration:none;">資金繰り表ページを開く</a>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="topline">
+      <strong>年間入出金データ（明細）</strong>
+      <span class="muted">選択中の年の完了済み入出金データを表示します。残高は0起点で計算します。</span>
       <button id="toggle-annual" class="section-toggle" type="button">展開する</button>
     </div>
     <div id="annual-section-body" class="table-wrap collapsed">
       <table>
-        <thead><tr><th>日付</th><th>件名</th><th>金額</th><th>メモ</th><th>残高</th></tr></thead>
+        <thead><tr><th>日付</th><th>区分</th><th>件名</th><th>金額</th><th>メモ</th><th>残高</th></tr></thead>
         <tbody id="annual-expense-rows"></tbody>
       </table>
     </div>
@@ -1843,7 +2229,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       <button id="clear-sample" type="button">サンプルデータ削除</button>
       <button id="clear-all-entries" type="button">予定一覧を全削除</button>
       <input id="rakuraku-csv-file" type="file" accept=".csv,text/csv" />
-      <button id="import-rakuraku-csv" type="button">CSV読み込み</button>
+      <button id="import-rakuraku-csv" type="button">楽楽販売CSV読込</button>
     </div>
     <form id="entry-form" class="row" novalidate>
       <div class="field">
@@ -1882,6 +2268,13 @@ function renderAppPage(email: string, isAdmin: boolean) {
         <label for="f-note">メモ</label>
         <input id="f-note" name="note" placeholder="任意" maxlength="140" />
         <div class="field-hint" data-hint-for="note">0-140文字</div>
+      </div>
+      <div class="field">
+        <label for="f-cf-category">CF区分</label>
+        <select id="f-cf-category" name="cfCategory">
+          ${renderCfCategoryOptions('')}
+        </select>
+        <div class="field-hint" data-hint-for="cfCategory">未設定可。後から一覧で修正できます</div>
       </div>
       <div class="field">
         <label for="f-customer-name">顧客名</label>
@@ -1936,6 +2329,9 @@ function renderAppPage(email: string, isAdmin: boolean) {
       </select>
       <button id="list-filter-reset" type="button">絞り込み解除</button>
       <button id="export-csv" class="secondary" type="button">CSV出力</button>
+      <input id="cashflow-csv-file" type="file" accept=".csv,text/csv" style="display:none" />
+      <button id="import-cashflow-csv" class="secondary" type="button">CSV入力</button>
+      <button id="csv-help-trigger" class="help-icon" type="button" title="CSV入力規則を表示">ⓘ</button>
       <span id="list-filter-caption" class="muted"></span>
     </div>
     <div class="bulk-bar">
@@ -1949,12 +2345,133 @@ function renderAppPage(email: string, isAdmin: boolean) {
     </div>
     <div id="list-section-body" class="table-wrap">
       <table>
-        <thead><tr><th></th><th>#</th><th>ラベル</th><th>予定日</th><th>区分</th><th>件名</th><th>金額</th><th>メモ</th><th>入出金日</th><th>顧客名</th><th>担当</th><th>残高</th><th>操作</th><th>選択</th></tr></thead>
+        <thead><tr><th></th><th>#</th><th>ラベル</th><th>予定日</th><th>区分</th><th>CF区分</th><th>件名</th><th>金額</th><th>メモ</th><th>入出金日</th><th>顧客名</th><th>担当</th><th>残高</th><th>操作</th><th>選択</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
   </section>
 </main>
+
+<div id="csv-help-modal" class="modal-overlay">
+  <div class="modal-box">
+    <span id="csv-help-close" class="modal-close">&times;</span>
+    <h3 style="margin-top:0;">CSV入力の記述規則について</h3>
+    <p style="font-size:13px; color:var(--muted); margin-bottom:12px;">
+      インポートするCSVファイル（Cashflow Managerから出力したCSV形式）は、以下の記述ルールに従ってデータを作成してください。
+    </p>
+    <div class="table-wrap" style="max-height: 50vh; overflow-y: auto;">
+      <table style="width:100%; border-collapse:collapse; font-size:12px; min-width: 500px;">
+        <thead>
+          <tr style="background:#f5f8fb; color:#334e68; font-weight:700;">
+            <th style="padding:8px; border-bottom:2px solid var(--line);">項目名</th>
+            <th style="padding:8px; border-bottom:2px solid var(--line);">必須</th>
+            <th style="padding:8px; border-bottom:2px solid var(--line);">ルール・指定形式</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>ID</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">既存の予定を上書き修正する場合はIDを指定します。<br>新規に予定を追加する場合は空欄にしてください。<br><small style="color:var(--expense);">※存在しないIDを指定するとエラーになります。</small></td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>予定日</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--expense); font-weight:700;">必須</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><code>YYYY-MM-DD</code> または <code>YYYY/MM/DD</code> 形式で入力してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>区分</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--expense); font-weight:700;">必須</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><code>入金</code> または <code>出金</code> を指定してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>件名</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--expense); font-weight:700;">必須</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">120文字以内で入力してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>金額</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--expense); font-weight:700;">必須</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">1以上の半角整数で入力してください（カンマ区切り可）。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>メモ</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">140文字以内で入力してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>入出金日</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><code>YYYY-MM-DD</code> または <code>YYYY/MM/DD</code> 形式で入力してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>顧客名</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">80文字以内で入力してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>担当社員名</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">80文字以内で入力してください。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>完了状態</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><code>完了</code> または <code>未完了</code> を指定してください（空欄は未完了）。</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>ラベル</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">以下のいずれかの英語（小文字）で入力してください：<br><code>red</code> (赤), <code>orange</code> (橙), <code>yellow</code> (黄), <code>green</code> (緑), <code>blue</code> (青), <code>purple</code> (紫)</td>
+          </tr>
+          <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>管理番号</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">80文字以内で入力してください。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:16px; text-align:right;">
+      <button id="csv-help-ok" type="button" class="primary" style="padding:8px 20px; font-size:13px; cursor:pointer;">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<div id="rakuraku-diff-modal" class="modal-overlay">
+  <div class="modal-box" style="max-width: 900px; width: 95%;">
+    <span id="rakuraku-diff-close" class="modal-close">&times;</span>
+    <h3 style="margin-top:0;">楽楽販売CSVインポート確認</h3>
+    <p style="font-size:13px; color:var(--muted); margin-bottom:12px;">
+      既存データとの差分を検出しました。上書き取り込みする予定にチェックを入れて「インポート実行」をクリックしてください。<br>
+      新規データ（<span id="rakuraku-new-count">0</span>件）は自動的にインポートされます。重複データは自動的にスキップされます。
+    </p>
+    <div class="table-wrap" style="max-height: 50vh; overflow-y: auto;">
+      <table class="diff-table">
+        <thead>
+          <tr style="background:#f5f8fb; color:#334e68; font-weight:700;">
+            <th style="width: 50px; text-align: center;"><input type="checkbox" id="rakuraku-diff-select-all" checked /></th>
+            <th>管理番号</th>
+            <th>区分</th>
+            <th>件名 (DB &rarr; CSV)</th>
+            <th>金額 (DB &rarr; CSV)</th>
+            <th>予定日 (DB &rarr; CSV)</th>
+            <th>顧客名 (DB &rarr; CSV)</th>
+          </tr>
+        </thead>
+        <tbody id="rakuraku-diff-rows">
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:16px; display: flex; justify-content: space-between; align-items: center;">
+      <span id="rakuraku-diff-summary" style="font-size:13px; font-weight:bold;">新規: 0件 / 差分更新: 0件</span>
+      <div style="display:flex; gap:8px;">
+        <button id="rakuraku-diff-cancel" type="button" class="secondary" style="padding:8px 20px; font-size:13px; cursor:pointer;">キャンセル</button>
+        <button id="rakuraku-diff-submit" type="button" class="primary" style="padding:8px 20px; font-size:13px; cursor:pointer;">インポート実行</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
   const yearInput = document.getElementById('year');
@@ -1974,6 +2491,19 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const clearAllEntriesBtn = document.getElementById('clear-all-entries');
   const rakurakuCsvFileInput = document.getElementById('rakuraku-csv-file');
   const importRakurakuCsvBtn = document.getElementById('import-rakuraku-csv');
+  const cashflowCsvFileInput = document.getElementById('cashflow-csv-file');
+  const importCashflowCsvBtn = document.getElementById('import-cashflow-csv');
+  const csvHelpTrigger = document.getElementById('csv-help-trigger');
+  const csvHelpModal = document.getElementById('csv-help-modal');
+  const csvHelpClose = document.getElementById('csv-help-close');
+  const csvHelpOk = document.getElementById('csv-help-ok');
+
+  const rakurakuDiffModal = document.getElementById('rakuraku-diff-modal');
+  const rakurakuDiffRows = document.getElementById('rakuraku-diff-rows');
+  const rakurakuNewCount = document.getElementById('rakuraku-new-count');
+  const rakurakuDiffSummary = document.getElementById('rakuraku-diff-summary');
+  const rakurakuDiffSelectAll = document.getElementById('rakuraku-diff-select-all');
+
   const toggleAnnualBtn = document.getElementById('toggle-annual');
   const toggleListBtn = document.getElementById('toggle-list');
   const sortByDateBtn = document.getElementById('sort-by-date');
@@ -2087,6 +2617,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     }
     const allowedAccounts = new Set(['', '三井住友口座', '和気口座', '那須口座']);
     const allowedColors = new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple']);
+    const allowedCfCategories = new Set(${JSON.stringify([...CF_CATEGORIES])});
     if (!allowedAccounts.has(payload.accountName)) {
       const hint = hints.get('accountName'); if (hint) hint.classList.add('error');
       return '口座名はプルダウンから選択してください。';
@@ -2106,6 +2637,10 @@ function renderAppPage(email: string, isAdmin: boolean) {
     if (!allowedColors.has(payload.labelColor)) {
       const hint = hints.get('labelColor'); if (hint) hint.classList.add('error');
       return '色ラベルを選択してください。';
+    }
+    if (!allowedCfCategories.has(payload.cfCategory || '')) {
+      const hint = hints.get('cfCategory'); if (hint) hint.classList.add('error');
+      return 'CF区分を正しく選択してください。';
     }
     return '';
   }
@@ -2195,17 +2730,18 @@ function renderAppPage(email: string, isAdmin: boolean) {
 
   function renderAnnualExpenses(rows) {
     if (rows.length === 0) {
-      annualExpenseRowsEl.innerHTML = '<tr><td colspan="5" class="muted">この年のデータはありません。</td></tr>';
+      annualExpenseRowsEl.innerHTML = '<tr><td colspan="6" class="muted">この年のデータはありません。</td></tr>';
       return;
     }
     let annualRunning = 0;
     annualExpenseRowsEl.innerHTML = rows.map((e) => {
       const amount = Number(e.amount || 0);
-      annualRunning -= amount;
+      annualRunning += e.type === 'income' ? amount : -amount;
       return '<tr>' +
       '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
+      '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
       '<td>' + escapeHtml(e.title || '') + '</td>' +
-      '<td class="amount expense">-' + fmt.format(amount) + '</td>' +
+      '<td class="amount ' + e.type + '">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
       '<td>' + escapeHtml(e.note || '') + '</td>' +
       '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
       '</tr>'
@@ -2329,6 +2865,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       const haystack = [
         e.title || '',
         e.note || '',
+        e.cf_category || '',
         e.account_name || '',
         e.customer_name || '',
         e.staff_name || '',
@@ -2355,7 +2892,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
 
   function renderRows() {
     if (entries.length === 0) {
-      rowsEl.innerHTML = '<tr><td colspan="14" class="muted">データがありません。上のフォームから予定を追加してください。</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="15" class="muted">データがありません。上のフォームから予定を追加してください。</td></tr>';
       listFilterCaptionEl.textContent = '';
       updateBulkSelectionCaption();
       return;
@@ -2368,7 +2905,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       : String(filtered.length) + ' / ' + String(entries.length) + '件を表示';
 
     if (filtered.length === 0) {
-      rowsEl.innerHTML = '<tr><td colspan="14" class="muted">絞り込み条件に一致する予定はありません。</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="15" class="muted">絞り込み条件に一致する予定はありません。</td></tr>';
       updateBulkSelectionCaption();
       return;
     }
@@ -2393,7 +2930,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
         ? '<button type="button" class="toggle-mgmt" data-togglemgmt="1" data-id="' + e.id + '">' + toggleLabel + '</button>'
         : '';
       const detailRow = hasMgmt && expanded
-        ? '<tr class="detail-row"><td></td><td colspan="13">入出金管理No: ' + escapeHtml(String(e.import_management_no || '')) + '</td></tr>'
+        ? '<tr class="detail-row"><td></td><td colspan="14">入出金管理No: ' + escapeHtml(String(e.import_management_no || '')) + '</td></tr>'
         : '';
 
       return '<tr' + rowClass + '>' +
@@ -2405,6 +2942,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
         '</td>' +
         '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
         '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
+        '<td>' + escapeHtml(e.cf_category || '未設定') + '</td>' +
         '<td>' + escapeHtml(e.title) + '</td>' +
         '<td class="amount ' + e.type + '">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
         '<td>' + escapeHtml(e.note || '') + '</td>' +
@@ -2424,6 +2962,9 @@ function renderAppPage(email: string, isAdmin: boolean) {
             '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
             '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
             '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
+            '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
+            buildCfCategoryOptionsHtml(String(e.cf_category || '')) +
+            '</select>' +
             '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
             '<option value="red"' + (e.label_color === 'red' ? ' selected' : '') + '>色:赤</option>' +
             '<option value="orange"' + (e.label_color === 'orange' ? ' selected' : '') + '>色:橙</option>' +
@@ -2709,6 +3250,28 @@ function renderAppPage(email: string, isAdmin: boolean) {
       return;
     }
     if (!(target instanceof HTMLSelectElement)) return;
+    if (target.dataset.editcfcategory && target.dataset.id) {
+      const id = Number(target.dataset.id);
+      const cfCategory = String(target.value || '').trim();
+      try {
+        const res = await fetch('/api/entries/' + encodeURIComponent(String(id)) + '/cf-category', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cfCategory })
+        });
+        if (!res.ok) {
+          showBanner(statusBanner, 'error', 'CF区分の更新に失敗しました。');
+          await loadAll();
+          return;
+        }
+        showBanner(statusBanner, 'ok', 'CF区分を更新しました。');
+        await loadAll();
+      } catch (_) {
+        showBanner(statusBanner, 'error', 'CF区分更新中に通信エラーが発生しました。');
+        await loadAll();
+      }
+      return;
+    }
     if (!target.dataset.editcolor || !target.dataset.id) return;
     const id = Number(target.dataset.id);
     const labelColor = String(target.value || '').trim();
@@ -2745,7 +3308,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
       accountName: '',
       customerName: String(fd.get('customerName') || '').trim(),
       staffName: String(fd.get('staffName') || '').trim(),
-      labelColor: String(fd.get('labelColor') || 'blue').trim()
+      labelColor: String(fd.get('labelColor') || 'blue').trim(),
+      cfCategory: String(fd.get('cfCategory') || '').trim()
     };
 
     const err = validatePayload(payload);
@@ -2818,6 +3382,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
       showBanner(statusBanner, 'error', payload.error || '全削除に失敗しました。');
     }
   });
+  let pendingImportData = null;
+
   importRakurakuCsvBtn.addEventListener('click', async () => {
     const file = rakurakuCsvFileInput && rakurakuCsvFileInput.files ? rakurakuCsvFileInput.files[0] : null;
     if (!file) {
@@ -2826,13 +3392,206 @@ function renderAppPage(email: string, isAdmin: boolean) {
     }
     importRakurakuCsvBtn.disabled = true;
     const previousLabel = importRakurakuCsvBtn.textContent;
-    importRakurakuCsvBtn.textContent = '取り込み中...';
+    importRakurakuCsvBtn.textContent = '解析中...';
+    showBanner(statusBanner, 'warn', 'CSVを解析中です。しばらくお待ちください。');
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/import/rakuraku', {
+        method: 'POST',
+        body: formData
+      });
+      const rawBody = await res.text();
+      const payload = safeJsonParse(rawBody) || {};
+      if (!res.ok || !payload.ok) {
+        showBanner(
+          statusBanner,
+          'error',
+          buildApiErrorMessage(payload, rawBody, 'CSV解析に失敗しました。')
+        );
+        return;
+      }
+      const newEntries = payload.newEntries || [];
+      const diffEntries = payload.diffEntries || [];
+      if (newEntries.length === 0 && diffEntries.length === 0) {
+        showBanner(statusBanner, 'ok', 'インポート対象の新しいデータ、または更新されたデータはありませんでした。');
+        if (rakurakuCsvFileInput) rakurakuCsvFileInput.value = '';
+        return;
+      }
+      pendingImportData = { newEntries, diffEntries };
+      if (diffEntries.length === 0) {
+        const ok = confirm(\`新規データ \${newEntries.length} 件をインポートしますか？ (重複する既存データはありません)\`);
+        if (ok) {
+          await commitRakurakuImport(newEntries, []);
+        } else {
+          pendingImportData = null;
+          if (rakurakuCsvFileInput) rakurakuCsvFileInput.value = '';
+        }
+      } else {
+        showRakurakuDiffModal(newEntries, diffEntries);
+      }
+    } catch (_) {
+      showBanner(statusBanner, 'error', 'CSV解析中にエラーが発生しました。');
+    } finally {
+      importRakurakuCsvBtn.disabled = false;
+      importRakurakuCsvBtn.textContent = previousLabel || '楽楽販売CSV読込';
+    }
+  });
+
+  function showRakurakuDiffModal(newEntries, diffEntries) {
+    if (!rakurakuDiffModal || !rakurakuDiffRows) return;
+    if (rakurakuNewCount) rakurakuNewCount.textContent = String(newEntries.length);
+    if (rakurakuDiffSummary) {
+      rakurakuDiffSummary.textContent = \`新規追加: \${newEntries.length}件 / 差分更新: \${diffEntries.length}件\`;
+    }
+    rakurakuDiffRows.innerHTML = '';
+    diffEntries.forEach((entry, idx) => {
+      const tr = document.createElement('tr');
+      tr.dataset.idx = String(idx);
+      const typeText = entry.type === 'income' ? '入金' : '出金';
+      const typeClass = entry.type === 'income' ? 'income' : 'expense';
+      tr.innerHTML = \`
+        <td style="text-align: center;"><input type="checkbox" class="rakuraku-diff-item-check" data-idx="\${idx}" checked /></td>
+        <td>\${escapeHtml(entry.managementNo || '')}</td>
+        <td><span class="amount \${typeClass}">\${typeText}</span></td>
+        <td>\${formatDiffCell(entry.title.old, entry.title.new)}</td>
+        <td>\${formatDiffCell(formatCurrency(entry.amount.old), formatCurrency(entry.amount.new))}</td>
+        <td>\${formatDiffCell(entry.scheduledDate.old, entry.scheduledDate.new)}</td>
+        <td>\${formatDiffCell(entry.customerName.old, entry.customerName.new)}</td>
+      \`;
+      rakurakuDiffRows.appendChild(tr);
+    });
+    if (rakurakuDiffSelectAll) {
+      rakurakuDiffSelectAll.checked = true;
+    }
+    rakurakuDiffModal.style.display = 'flex';
+  }
+
+  function formatDiffCell(oldVal, newVal) {
+    if (oldVal === newVal) {
+      return \`<span class="diff-same">\${escapeHtml(String(oldVal))}</span>\`;
+    }
+    return \`<span class="diff-old">\${escapeHtml(String(oldVal))}</span> &rarr; <span class="diff-new">\${escapeHtml(String(newVal))}</span>\`;
+  }
+
+  function formatCurrency(val) {
+    if (val === null || val === undefined) return '';
+    return new Intl.NumberFormat('ja-JP', { style: 'currency', currency: 'JPY' }).format(val);
+  }
+
+  if (rakurakuDiffSelectAll) {
+    rakurakuDiffSelectAll.addEventListener('change', () => {
+      const checks = document.querySelectorAll('.rakuraku-diff-item-check');
+      checks.forEach((chk) => {
+        chk.checked = rakurakuDiffSelectAll.checked;
+      });
+    });
+  }
+
+  const closeRakurakuDiff = () => {
+    if (rakurakuDiffModal) {
+      rakurakuDiffModal.style.display = 'none';
+    }
+    pendingImportData = null;
+    if (rakurakuCsvFileInput) {
+      rakurakuCsvFileInput.value = '';
+    }
+  };
+
+  document.getElementById('rakuraku-diff-close')?.addEventListener('click', closeRakurakuDiff);
+  document.getElementById('rakuraku-diff-cancel')?.addEventListener('click', closeRakurakuDiff);
+  rakurakuDiffModal?.addEventListener('click', (ev) => {
+    if (ev.target === rakurakuDiffModal) closeRakurakuDiff();
+  });
+
+  document.getElementById('rakuraku-diff-submit')?.addEventListener('click', async () => {
+    if (!pendingImportData) return;
+    const submitBtn = document.getElementById('rakuraku-diff-submit');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const selectedUpdatedEntries = [];
+      const checks = document.querySelectorAll('.rakuraku-diff-item-check');
+      checks.forEach((chk) => {
+        if (chk.checked) {
+          const idx = parseInt(chk.dataset.idx, 10);
+          const entry = pendingImportData.diffEntries[idx];
+          if (entry) {
+            selectedUpdatedEntries.push({
+              id: entry.id,
+              managementNo: entry.managementNo,
+              type: entry.type,
+              title: entry.title.new,
+              amount: entry.amount.new,
+              scheduledDate: entry.scheduledDate.new,
+              customerName: entry.customerName.new
+            });
+          }
+        }
+      });
+      await commitRakurakuImport(pendingImportData.newEntries, selectedUpdatedEntries);
+      closeRakurakuDiff();
+    } catch (_) {
+      showBanner(statusBanner, 'error', 'コミット処理中にエラーが発生しました。');
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+
+  async function commitRakurakuImport(newEntries, updatedEntries) {
+    showBanner(statusBanner, 'warn', 'データをDBに反映しています。しばらくお待ちください。');
+    try {
+      const res = await fetch('/api/import/rakuraku/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newEntries, updatedEntries })
+      });
+      const rawBody = await res.text();
+      const payload = safeJsonParse(rawBody) || {};
+      if (!res.ok || !payload.ok) {
+        showBanner(
+          statusBanner,
+          'error',
+          buildApiErrorMessage(payload, rawBody, 'インポートの確定に失敗しました。')
+        );
+        return;
+      }
+      showBanner(
+        statusBanner,
+        'ok',
+        \`インポート完了: 新規追加 \${payload.insertedCount || 0} 件 / 上書き更新 \${payload.updatedCount || 0} 件\`
+      );
+      await loadAll();
+    } catch (_) {
+      showBanner(statusBanner, 'error', 'インポートの確定中にエラーが発生しました。');
+    }
+  }
+
+  csvHelpTrigger?.addEventListener('click', () => {
+    if (csvHelpModal) csvHelpModal.style.display = 'flex';
+  });
+  const closeCsvHelp = () => {
+    if (csvHelpModal) csvHelpModal.style.display = 'none';
+  };
+  csvHelpClose?.addEventListener('click', closeCsvHelp);
+  csvHelpOk?.addEventListener('click', closeCsvHelp);
+  csvHelpModal?.addEventListener('click', (ev) => {
+    if (ev.target === csvHelpModal) closeCsvHelp();
+  });
+
+  importCashflowCsvBtn?.addEventListener('click', () => {
+    cashflowCsvFileInput?.click();
+  });
+  cashflowCsvFileInput?.addEventListener('change', async () => {
+    const file = cashflowCsvFileInput && cashflowCsvFileInput.files ? cashflowCsvFileInput.files[0] : null;
+    if (!file) return;
+    if (importCashflowCsvBtn) importCashflowCsvBtn.disabled = true;
+    const previousLabel = importCashflowCsvBtn?.textContent;
+    if (importCashflowCsvBtn) importCashflowCsvBtn.textContent = '取り込み中...';
     showBanner(statusBanner, 'warn', 'CSVを取り込み中です。しばらくお待ちください。');
     try {
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('syncEntries', 'true');
-      const res = await fetch('/api/import/rakuraku', {
+      const res = await fetch('/api/import/cashflow', {
         method: 'POST',
         body: formData
       });
@@ -2846,19 +3605,31 @@ function renderAppPage(email: string, isAdmin: boolean) {
         );
         return;
       }
-      showBanner(
-        statusBanner,
-        'ok',
-        'CSV取込完了: 取込' + String(payload.importedRows || 0) + '件 / 重複' + String(payload.duplicateRows || 0) + '件 / 無効' + String(payload.invalidRows || 0) + '件 / 失敗' + String(payload.failedRows || 0) + '件 / 予定追加' + String(payload.insertedEntries || 0) + '件'
-      );
+      if (payload.rowErrors && payload.rowErrors.length > 0) {
+        statusBanner.className = 'banner show warn';
+        statusBanner.innerHTML = '<strong>CSVの取り込み中に一部エラーが発生しました。以下の行はスキップされました：</strong>' +
+          '<ul style="margin:4px 0 0;padding-left:20px;text-align:left;">' +
+          payload.rowErrors.map(err => '<li>[' + err.rowNumber + '行目]: ' + escapeHtml(err.message) + '</li>').join('') +
+          '</ul>';
+      } else {
+        showBanner(
+          statusBanner,
+          'ok',
+          'CSV取込完了: 追加' + String(payload.insertedEntries || 0) + '件 / 更新' + String(payload.updatedEntries || 0) + '件'
+        );
+      }
       await loadAll();
     } catch (_) {
       showBanner(statusBanner, 'error', 'CSV読み込み中にエラーが発生しました。');
     } finally {
-      importRakurakuCsvBtn.disabled = false;
-      importRakurakuCsvBtn.textContent = previousLabel || 'CSV読み込み';
+      if (importCashflowCsvBtn) {
+        importCashflowCsvBtn.disabled = false;
+        importCashflowCsvBtn.textContent = previousLabel || 'CSV入力';
+      }
+      if (cashflowCsvFileInput) cashflowCsvFileInput.value = '';
     }
   });
+
   sortByDateBtn?.addEventListener('click', () => {
     reorderByDate();
   });
@@ -2895,11 +3666,12 @@ function renderAppPage(email: string, isAdmin: boolean) {
       showBanner(statusBanner, 'warn', '出力するデータがありません。');
       return;
     }
-    const headers = ['#', '予定日', '区分', '件名', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'];
+    const headers = ['ID', '予定日', '区分', 'CF区分', '件名', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'];
     const rows = filtered.map((e, idx) => [
-      idx + 1,
+      e.id || '',
       e.scheduled_date || '',
       e.type === 'income' ? '入金' : '出金',
+      e.cf_category || '',
       e.title || '',
       e.amount || 0,
       e.note || '',
@@ -2913,7 +3685,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     const csvContent = [
       headers.map(h => '"' + h.replace(/"/g, '""') + '"').join(','),
       ...rows.map(row => row.map(val => '"' + String(val).replace(/"/g, '""') + '"').join(','))
-    ].join('\r\n');
+    ].join(String.fromCharCode(13, 10));
     const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
     const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
@@ -3175,6 +3947,388 @@ bindChartTooltip('trend');
 </html>`;
 }
 
+function renderCashflowStatementPage(email: string, isAdmin: boolean) {
+  const displayColumns = buildCashflowStatementDisplayColumns(2026, 2031, new Date());
+  const printableMonthColumns = displayColumns.map((column, index) => ({ column, index }));
+  const sourceMonthColumnIndexes = CASHFLOW_STATEMENT_COLUMNS
+    .map((column, index) => ({ column, index }))
+    .filter(({ column }) => isCashflowStatementMonthLabel(column.yearLabel));
+  const monthOptionsHtml = printableMonthColumns
+    .map(({ column }) => {
+      const monthKey = toCashflowStatementMonthKey(column.yearLabel);
+      return `<option value="${escapeHtml(monthKey)}">${escapeHtml(formatCashflowStatementMonthOption(column.yearLabel))}</option>`;
+    })
+    .join('');
+  const defaultStartMonth = printableMonthColumns[0]?.column.yearLabel ?? '';
+  const defaultEndMonth = printableMonthColumns[Math.min(11, printableMonthColumns.length - 1)]?.column.yearLabel ?? '';
+  const summaryText = [
+    `列数 ${displayColumns.length}`,
+    `行数 ${CASHFLOW_STATEMENT_ROWS.length}`,
+    '表示期間: 2026年1月〜2031年12月',
+    '元データ: 資金繰り表実績値のみ202600616.xlsx'
+  ].join(' / ');
+  const rowHtml = CASHFLOW_STATEMENT_ROWS.map((row, index) => {
+    const gapClass = index > 0 && CASHFLOW_STATEMENT_ROWS[index - 1].rowNo + 1 < row.rowNo ? ' row-gap' : '';
+    const rowClass = `row-${row.kind}${gapClass}`;
+    const label = row.label ? escapeHtml(row.label) : '&nbsp;';
+    const subLabel = row.subLabel ? escapeHtml(row.subLabel) : '&nbsp;';
+    const sourceMonthValues = new Map<string, number | string | null>();
+    sourceMonthColumnIndexes.forEach(({ column, index: columnIndex }) => {
+      sourceMonthValues.set(toCashflowStatementMonthKey(column.yearLabel), row.values[columnIndex] ?? null);
+    });
+    const cells = displayColumns.map((column) => {
+      const value = sourceMonthValues.get(toCashflowStatementMonthKey(column.yearLabel)) ?? null;
+      const isNumber = typeof value === 'number';
+      const cellClass = isNumber ? `num${value < 0 ? ' neg' : ''}` : 'empty';
+      return `<td class="${cellClass}" data-col-key="${escapeHtml(column.key)}">${formatCashflowStatementValue(value)}</td>`;
+    }).join('');
+    return `<tr class="${rowClass}">
+      <th scope="row" class="sticky-col sticky-label">${label}</th>
+      <td class="sticky-col sticky-sub">${subLabel}</td>
+      ${cells}
+    </tr>`;
+  }).join('');
+  const headerYearCells = displayColumns
+    .map((column) => `<th class="month-col" data-col-key="${escapeHtml(column.key)}">${escapeHtml(formatCashflowStatementHeaderLabel(column.yearLabel))}</th>`)
+    .join('');
+  const headerStatusCells = displayColumns
+    .map((column) => `<th class="month-col status-${cashflowStatementStatusClass(column.status)}" data-col-key="${escapeHtml(column.key)}">${escapeHtml(column.status)}</th>`)
+    .join('');
+
+  return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>資金繰り表 | Cashflow</title>
+  <style>
+    :root { --bg:#eef2f6; --panel:#fff; --line:#d4dde7; --text:#1d2733; --muted:#5e7188; --accent:#0f4c81; --accent-deep:#0b3558; --shadow:0 6px 20px rgba(10,36,64,.08); --total:#eef6ff; --carry:#edf9f1; --section:#f6f8fb; --heading:#fff7e8; --plan:#fff7e8; --actual:#eef7ff; --sum:#f3f6fa; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"Noto Sans JP","Hiragino Sans",sans-serif; color:var(--text); background:linear-gradient(180deg,#f7f9fc 0%, var(--bg) 100%); }
+    .wrap { max-width: 100%; padding: 18px 16px 36px; }
+    .head { display:flex; justify-content:space-between; align-items:flex-end; gap:12px; flex-wrap:wrap; margin:0 auto 14px; max-width:1680px; }
+    .title { font-size:30px; font-weight:700; }
+    .sub { color:var(--muted); font-size:13px; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .actions a { display:inline-flex; align-items:center; padding:9px 10px; border:1px solid #b9c8d9; border-radius:8px; background:#fff; color:var(--text); text-decoration:none; font-size:14px; }
+    .range-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-top:14px; }
+    .range-toolbar label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+    .range-toolbar select, .range-toolbar button { border:1px solid #b9c8d9; border-radius:8px; background:#fff; color:var(--text); font-size:14px; padding:9px 10px; }
+    .range-toolbar button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:700; }
+    .range-note { font-size:12px; color:var(--muted); margin-top:8px; }
+    .range-alert { display:none; margin-top:10px; padding:10px 12px; border-radius:10px; background:#fff4db; border:1px solid #f3d28a; color:#7a5300; font-size:13px; font-weight:700; }
+    .range-alert.show { display:block; }
+    .panel { max-width:1680px; margin:0 auto 14px; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:0 1px 0 rgba(15,47,74,.04); overflow:hidden; }
+    .panel-body { padding:16px; }
+    .lead { display:grid; grid-template-columns: 1.5fr 1fr; gap:12px; align-items:start; }
+    .lead-card { border:1px solid var(--line); border-radius:12px; padding:14px; background:#fbfdff; }
+    .lead-card strong { display:block; margin-bottom:6px; }
+    .meta { font-size:12px; color:var(--muted); }
+    .table-scroll-x { overflow-x:auto; overflow-y:hidden; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:#f8fafc; height:18px; }
+    .table-scroll-x.is-hidden { display:none; }
+    .table-scroll-x-inner { height:1px; }
+    .table-wrap { overflow:auto; border-top:1px solid var(--line); }
+    table { width:max-content; min-width:100%; border-collapse:separate; border-spacing:0; font-size:12px; }
+    thead th { position:sticky; top:0; z-index:3; background:#f5f8fb; color:#334e68; font-weight:700; }
+    th, td { border-right:1px solid #e7edf4; border-bottom:1px solid #e7edf4; padding:8px 10px; white-space:nowrap; }
+    thead tr:first-child th { border-top:0; }
+    tr > *:first-child { border-left:0; }
+    .sticky-col { position:sticky; left:0; z-index:2; background:#fff; }
+    .sticky-sub { left:230px; min-width:130px; max-width:130px; background:#fff; }
+    .sticky-label { min-width:230px; max-width:230px; }
+    thead .sticky-col { z-index:4; background:#eef3f8; }
+    .month-col { min-width:88px; text-align:right; }
+    tbody th { text-align:left; font-weight:600; }
+    td { text-align:right; font-variant-numeric:tabular-nums; }
+    td.empty { color:#9aa5b1; text-align:center; }
+    td.neg { color:#b22a34; }
+    .row-section > * { background:var(--section); font-weight:700; }
+    .row-total > * { background:var(--total); font-weight:700; }
+    .row-carry > * { background:var(--carry); font-weight:700; }
+    .row-heading > * { background:var(--heading); font-weight:700; }
+    .row-subitem .sticky-sub { padding-left:22px; color:#44556b; }
+    .row-gap > * { border-top:8px solid #fff; }
+    .col-hidden { display:none; }
+    .status-実績 { background:var(--actual); }
+    .status-計画 { background:var(--plan); }
+    .status-合計 { background:var(--sum); }
+    .legend { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .chip { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+    .chip::before { content:""; width:10px; height:10px; border-radius:999px; display:inline-block; background:#cbd5e1; }
+    .chip.actual::before { background:#bfdbfe; }
+    .chip.plan::before { background:#fde68a; }
+    .chip.total::before { background:#dbeafe; }
+    .chip.carry::before { background:#bbf7d0; }
+    @media (max-width: 960px) {
+      .lead { grid-template-columns:1fr; }
+      .sticky-label { min-width:190px; max-width:190px; }
+      .sticky-sub { left:190px; min-width:110px; max-width:110px; }
+      .month-col { min-width:78px; }
+    }
+    @page { size: A3 landscape; margin: 8mm; }
+    @media print {
+      body { background:#fff; }
+      .wrap { padding:0; }
+      .head, .range-toolbar, .range-note, .range-alert, .table-scroll-x { display:none !important; }
+      .panel { max-width:none; margin:0; border:0; box-shadow:none; border-radius:0; }
+      .panel-body { display:none; }
+      table { width:100% !important; min-width:0; font-size:9px; }
+      th, td { padding:4px 6px; }
+      .sticky-col, .sticky-sub, .sticky-label, thead .sticky-col { position:static; left:auto; }
+      .table-wrap { overflow:visible; border-top:1px solid var(--line); }
+      .month-col { min-width:0; }
+    }
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header class="head">
+    <div>
+      <div class="title">資金繰り表</div>
+      <div class="sub">Excel原本をWebで再現したたたき台 | ${escapeHtml(email)}</div>
+    </div>
+    <div class="actions">
+      <a href="/app">Cashflow Managerへ戻る</a>
+      <a href="/fiscal">年間サマリー</a>
+      ${isAdmin ? '<a href="/audit">監査ログ</a>' : ''}
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="panel-body">
+      <div class="lead">
+        <div class="lead-card">
+          <strong>このページの役割</strong>
+          <div class="sub">2026年から2031年までの月列を先に用意し、月が終了したら自動で「計画」から「実績」へ切り替わる前提の表示にしています。次の段階では、CF行に仕分け区分を持たせて各年月セルへ自動加算・減算できるように拡張します。</div>
+          <div class="range-toolbar">
+            <label>
+              開始月
+              <select id="pdf-range-start">${monthOptionsHtml}</select>
+            </label>
+            <label>
+              終了月
+              <select id="pdf-range-end">${monthOptionsHtml}</select>
+            </label>
+            <button id="apply-range" type="button">表示に反映</button>
+            <button id="print-pdf" type="button" class="primary">PDF保存</button>
+            <button id="export-excel" type="button">Excel出力</button>
+          </div>
+          <div class="range-note">A3・1枚想定のため、PDF保存できる月範囲は最大12か月までに制限しています。</div>
+          <div id="range-alert" class="range-alert" role="alert"></div>
+        </div>
+        <div class="lead-card">
+          <strong>読み込み元</strong>
+          <div class="meta">${escapeHtml(summaryText)}</div>
+          <div class="legend">
+            <span class="chip actual">実績</span>
+            <span class="chip plan">計画</span>
+            <span class="chip total">収支・合計</span>
+            <span class="chip carry">繰越</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="table-scroll-x" class="table-scroll-x" aria-hidden="true">
+      <div id="table-scroll-x-inner" class="table-scroll-x-inner"></div>
+    </div>
+    <div id="table-wrap" class="table-wrap">
+      <table id="cashflow-statement-table" aria-label="資金繰り表">
+        <thead>
+          <tr>
+            <th class="sticky-col sticky-label">項目</th>
+            <th class="sticky-col sticky-sub">補足</th>
+            ${headerYearCells}
+          </tr>
+          <tr>
+            <th class="sticky-col sticky-label">区分</th>
+            <th class="sticky-col sticky-sub">内訳</th>
+            ${headerStatusCells}
+          </tr>
+        </thead>
+        <tbody>
+          ${rowHtml}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+  const MAX_PDF_MONTH_RANGE = 12;
+  const printableMonthKeys = ${JSON.stringify(printableMonthColumns.map(({ column }) => toCashflowStatementMonthKey(column.yearLabel)))};
+  const monthColumnMap = ${JSON.stringify(printableMonthColumns.map(({ column, index }) => ({ key: toCashflowStatementMonthKey(column.yearLabel), columnKey: column.key, index })))};
+  const topScrollEl = document.getElementById('table-scroll-x');
+  const topScrollInnerEl = document.getElementById('table-scroll-x-inner');
+  const tableWrapEl = document.getElementById('table-wrap');
+  const statementTableEl = document.getElementById('cashflow-statement-table');
+  const rangeStartEl = document.getElementById('pdf-range-start');
+  const rangeEndEl = document.getElementById('pdf-range-end');
+  const applyRangeBtn = document.getElementById('apply-range');
+  const printPdfBtn = document.getElementById('print-pdf');
+  const exportExcelBtn = document.getElementById('export-excel');
+  const rangeAlertEl = document.getElementById('range-alert');
+  let syncingScroll = false;
+
+  function showRangeAlert(message) {
+    if (!rangeAlertEl) return;
+    rangeAlertEl.textContent = message;
+    rangeAlertEl.classList.add('show');
+  }
+
+  function hideRangeAlert() {
+    if (!rangeAlertEl) return;
+    rangeAlertEl.textContent = '';
+    rangeAlertEl.classList.remove('show');
+  }
+
+  function getSelectedMonthRange() {
+    const startKey = String(rangeStartEl?.value || '');
+    const endKey = String(rangeEndEl?.value || '');
+    const startIndex = printableMonthKeys.indexOf(startKey);
+    const endIndex = printableMonthKeys.indexOf(endKey);
+    if (startIndex === -1 || endIndex === -1) {
+      return { ok: false, message: '開始月または終了月が不正です。' };
+    }
+    if (startIndex > endIndex) {
+      return { ok: false, message: '開始月は終了月以前を選択してください。' };
+    }
+    return { ok: true, startIndex, endIndex, monthCount: endIndex - startIndex + 1 };
+  }
+
+  function applySelectedRange() {
+    const result = getSelectedMonthRange();
+    if (!result.ok) {
+      showRangeAlert(result.message);
+      return false;
+    }
+    hideRangeAlert();
+    const visibleColumnKeys = new Set(monthColumnMap
+      .slice(result.startIndex, result.endIndex + 1)
+      .map((item) => item.columnKey));
+    const cells = statementTableEl?.querySelectorAll('[data-col-key]') || [];
+    cells.forEach((cell) => {
+      const key = cell.getAttribute('data-col-key') || '';
+      cell.classList.toggle('col-hidden', !visibleColumnKeys.has(key));
+    });
+    syncStatementScrollMetrics();
+    if (tableWrapEl) tableWrapEl.scrollLeft = 0;
+    if (topScrollEl) topScrollEl.scrollLeft = 0;
+    return true;
+  }
+
+  function handlePrintPdf() {
+    const result = getSelectedMonthRange();
+    if (!result.ok) {
+      showRangeAlert(result.message);
+      return;
+    }
+    if (result.monthCount > MAX_PDF_MONTH_RANGE) {
+      showRangeAlert('選択範囲が長すぎます。A3・1枚で保存するため、PDF保存は12か月以内で選択してください。');
+      return;
+    }
+    if (!applySelectedRange()) return;
+    hideRangeAlert();
+    window.print();
+  }
+
+  function buildExportFileName(extension) {
+    const startKey = String(rangeStartEl?.value || '');
+    const endKey = String(rangeEndEl?.value || '');
+    return 'cashflow_statement_' + startKey + '_to_' + endKey + '.' + extension;
+  }
+
+  function escapeExcelHtml(value) {
+    return String(value || '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+  }
+
+  function handleExportExcel() {
+    if (!applySelectedRange()) return;
+    hideRangeAlert();
+
+    const visibleRows = Array.from(statementTableEl?.querySelectorAll('tr') || []);
+    const htmlRows = visibleRows.map((row) => {
+      const visibleCells = Array.from(row.children).filter((cell) => {
+        if (!(cell instanceof HTMLElement)) return false;
+        return !cell.classList.contains('col-hidden');
+      });
+      const cellsHtml = visibleCells.map((cell) => {
+        const tag = cell.tagName.toLowerCase() === 'th' ? 'th' : 'td';
+        const text = escapeExcelHtml(cell.textContent || '');
+        return '<' + tag + '>' + text + '</' + tag + '>';
+      }).join('');
+      return '<tr>' + cellsHtml + '</tr>';
+    }).join('');
+
+    const workbookHtml = '<!doctype html>' +
+      '<html xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+      'xmlns:x="urn:schemas-microsoft-com:office:excel" ' +
+      'xmlns="http://www.w3.org/TR/REC-html40">' +
+      '<head>' +
+      '<meta charset="UTF-8">' +
+      '<meta name="ProgId" content="Excel.Sheet">' +
+      '<meta name="Generator" content="Cashflow Manager">' +
+      '<style>' +
+      'table { border-collapse: collapse; font-family: "Yu Gothic", "Meiryo", sans-serif; font-size: 11pt; }' +
+      'th, td { border: 1px solid #cbd5e1; padding: 6px 8px; white-space: nowrap; }' +
+      'th { background: #f5f8fb; font-weight: 700; }' +
+      '</style>' +
+      '</head>' +
+      '<body>' +
+      '<table>' + htmlRows + '</table>' +
+      '</body>' +
+      '</html>';
+
+    const blob = new Blob(['\ufeff', workbookHtml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = buildExportFileName('xls');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function syncStatementScrollMetrics() {
+    if (!topScrollEl || !topScrollInnerEl || !tableWrapEl || !statementTableEl) return;
+    const fullWidth = statementTableEl.scrollWidth;
+    const visibleWidth = tableWrapEl.clientWidth;
+    topScrollInnerEl.style.width = fullWidth + 'px';
+    topScrollEl.classList.toggle('is-hidden', fullWidth <= visibleWidth + 1);
+  }
+
+  function syncTopScrollFromTable() {
+    if (!topScrollEl || !tableWrapEl || syncingScroll) return;
+    syncingScroll = true;
+    topScrollEl.scrollLeft = tableWrapEl.scrollLeft;
+    syncingScroll = false;
+  }
+
+  function syncTableScrollFromTop() {
+    if (!topScrollEl || !tableWrapEl || syncingScroll) return;
+    syncingScroll = true;
+    tableWrapEl.scrollLeft = topScrollEl.scrollLeft;
+    syncingScroll = false;
+  }
+
+  if (rangeStartEl) rangeStartEl.value = ${JSON.stringify(toCashflowStatementMonthKey(defaultStartMonth))};
+  if (rangeEndEl) rangeEndEl.value = ${JSON.stringify(toCashflowStatementMonthKey(defaultEndMonth))};
+  applySelectedRange();
+  syncStatementScrollMetrics();
+  topScrollEl?.addEventListener('scroll', syncTableScrollFromTop, { passive: true });
+  tableWrapEl?.addEventListener('scroll', syncTopScrollFromTable, { passive: true });
+  applyRangeBtn?.addEventListener('click', applySelectedRange);
+  printPdfBtn?.addEventListener('click', handlePrintPdf);
+  exportExcelBtn?.addEventListener('click', handleExportExcel);
+  window.addEventListener('resize', syncStatementScrollMetrics);
+</script>
+</body>
+</html>`;
+}
+
 function renderAuditPage(email: string) {
   return `<!doctype html>
 <html lang="ja">
@@ -3264,14 +4418,43 @@ function renderAuditPage(email: string) {
   const reloadBtn = document.getElementById('reload');
   const sessionRows = document.getElementById('session-rows');
   const opRows = document.getElementById('op-rows');
+  const auditDateTimeFormatter = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
 
-  function esc(s){return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\"','&quot;').replaceAll(\"'\",'&#39;');}
+  function esc(s){return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');}
+  function formatDateInputValue(date){
+    const parts = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: 'Asia/Tokyo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(date);
+    const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+    return map.year + '-' + map.month + '-' + map.day;
+  }
+  function formatAuditDateTime(value){
+    const raw = String(value || '').trim();
+    if (!raw) return '-';
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/);
+    const iso = match ? match[1] + 'T' + match[2] + 'Z' : raw;
+    const parsed = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return auditDateTimeFormatter.format(parsed);
+  }
 
   function initDates(){
     const now = new Date();
-    const to = now.toISOString().slice(0,10);
+    const to = formatDateInputValue(now);
     const fromDate = new Date(now.getTime() - 29*24*60*60*1000);
-    const from = fromDate.toISOString().slice(0,10);
+    const from = formatDateInputValue(fromDate);
     fromEl.value = from;
     toEl.value = to;
   }
@@ -3294,11 +4477,11 @@ function renderAuditPage(email: string) {
     const oLogs = Array.isArray(o.logs) ? o.logs : [];
 
     sessionRows.innerHTML = sLogs.length ? sLogs.map((r) =>
-      '<tr><td>' + esc(r.user_email || '-') + '</td><td>' + esc(r.login_at) + '</td><td>' + esc(r.logout_at || '-') + '</td><td>' + esc(r.logout_reason || '-') + '</td><td class=\"muted\">' + esc(r.session_token_masked || '-') + '</td></tr>'
+      '<tr><td>' + esc(r.user_email || '-') + '</td><td>' + esc(formatAuditDateTime(r.login_at)) + '</td><td>' + esc(formatAuditDateTime(r.logout_at)) + '</td><td>' + esc(r.logout_reason || '-') + '</td><td class=\"muted\">' + esc(r.session_token_masked || '-') + '</td></tr>'
     ).join('') : '<tr><td colspan=\"5\" class=\"muted\">履歴がありません</td></tr>';
 
     opRows.innerHTML = oLogs.length ? oLogs.map((r) =>
-      '<tr><td>' + esc(r.user_email || '-') + '</td><td>' + esc(r.created_at) + '</td><td><span class=\"tag ' + esc(r.action_type) + '\">' + esc(r.action_type) + '</span></td><td>' + esc(r.target_type) + '</td><td>' + esc(r.target_id ?? '-') + '</td><td class=\"muted\">' + esc(r.detail || '-') + '</td></tr>'
+      '<tr><td>' + esc(r.user_email || '-') + '</td><td>' + esc(formatAuditDateTime(r.created_at)) + '</td><td><span class=\"tag ' + esc(r.action_type) + '\">' + esc(r.action_type) + '</span></td><td>' + esc(r.target_type) + '</td><td>' + esc(r.target_id ?? '-') + '</td><td class=\"muted\">' + esc(r.detail || '-') + '</td></tr>'
     ).join('') : '<tr><td colspan=\"6\" class=\"muted\">履歴がありません</td></tr>';
   }
 
@@ -3366,6 +4549,57 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+function formatCashflowStatementHeaderLabel(value: string): string {
+  if (/^\d{4}年$/.test(value)) return value;
+  const match = value.match(/^(\d{4})-(\d{2})-\d{2}/);
+  if (match) return `${match[1]}/${match[2]}`;
+  return value;
+}
+
+function formatCashflowStatementValue(value: number | string | null): string {
+  if (value === null || value === '') return '–';
+  if (typeof value === 'number') return new Intl.NumberFormat('ja-JP').format(value);
+  return escapeHtml(String(value));
+}
+
+function cashflowStatementStatusClass(status: string): string {
+  if (status === '実績') return '実績';
+  if (status === '計画') return '計画';
+  return '合計';
+}
+
+function buildCashflowStatementDisplayColumns(startYear: number, endYear: number, now: Date) {
+  const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const columns: Array<{ key: string; yearLabel: string; status: string }> = [];
+  for (let year = startYear; year <= endYear; year += 1) {
+    for (let month = 1; month <= 12; month += 1) {
+      const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+      columns.push({
+        key: `m-${monthKey}`,
+        yearLabel: `${monthKey}-01 00:00:00`,
+        status: monthKey < currentMonthKey ? '実績' : '計画'
+      });
+    }
+  }
+  return columns;
+}
+
+function isCashflowStatementMonthLabel(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}/.test(value);
+}
+
+function toCashflowStatementMonthKey(value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-\d{2}/);
+  if (!match) return value;
+  return `${match[1]}-${match[2]}`;
+}
+
+function formatCashflowStatementMonthOption(value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-\d{2}/);
+  if (!match) return value;
+  return `${match[1]}年${String(Number(match[2]))}月`;
+}
+
 function sanitizeMonth(month?: string | null): string {
   const m = (month ?? '').trim();
   if (/^\d{4}-\d{2}$/.test(m)) return m;
@@ -3394,6 +4628,21 @@ function parseDateOnly(date?: string | null): string | null {
   return d;
 }
 
+function toAuditUtcStart(date?: string | null): string | null {
+  if (!date) return null;
+  const parsed = new Date(`${date}T00:00:00+09:00`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function toAuditUtcEndExclusive(date?: string | null): string | null {
+  if (!date) return null;
+  const parsed = new Date(`${date}T00:00:00+09:00`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  parsed.setUTCDate(parsed.getUTCDate() + 1);
+  return parsed.toISOString().slice(0, 19).replace('T', ' ');
+}
+
 function parseSlashOrIsoDate(date?: string | null): string | null {
   const raw = (date ?? '').trim();
   if (!raw) return null;
@@ -3413,9 +4662,16 @@ function parseNullableInt(value: unknown): number | null {
 
 function decodeShiftJisLike(bytes: Uint8Array): string {
   try {
-    return new TextDecoder('shift_jis', { fatal: false }).decode(bytes);
-  } catch {
-    return new TextDecoder().decode(bytes);
+    // Buffer.from で Buffer に変換し、iconv.decode で windows-31j (CP932) としてデコードします
+    // 明示的に node:buffer から Buffer をインポートしたため、確実に動作します
+    return iconv.decode(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), 'windows-31j');
+  } catch (error) {
+    console.error('iconv-lite decode failed, fallback to TextDecoder. Error details:', error);
+    try {
+      return new TextDecoder('windows-31j', { fatal: false }).decode(bytes);
+    } catch {
+      return new TextDecoder().decode(bytes);
+    }
   }
 }
 
@@ -3579,6 +4835,7 @@ function isValidEntryInput(input: {
   customerName: string;
   staffName: string;
   labelColor: string;
+  cfCategory: string;
 }): input is {
   title: string;
   note: string;
@@ -3589,9 +4846,11 @@ function isValidEntryInput(input: {
   customerName: string;
   staffName: string;
   labelColor: string;
+  cfCategory: string;
 } {
   const allowedAccounts = new Set(['', '三井住友口座', '和気口座', '那須口座']);
   const allowedColors = new Set<string>(ENTRY_LABEL_COLORS);
+  const allowedCfCategories = new Set<string>(CF_CATEGORIES);
   return (
     input.title.length > 0 &&
     input.title.length <= MAX_TITLE_LENGTH &&
@@ -3601,12 +4860,27 @@ function isValidEntryInput(input: {
     input.customerName.length <= 80 &&
     input.staffName.length <= 80 &&
     allowedColors.has(input.labelColor) &&
+    allowedCfCategories.has(input.cfCategory) &&
     Number.isInteger(input.amount) &&
     Number(input.amount) >= MIN_AMOUNT &&
     Number(input.amount) <= MAX_AMOUNT &&
     isValidType(input.type) &&
     isValidDate(typeof input.scheduledDate === 'string' ? input.scheduledDate : undefined)
   );
+}
+
+function renderCfCategoryOptions(selected: string): string {
+  return CF_CATEGORIES.map((category) => {
+    const label = category === '' ? '未設定' : category;
+    return `<option value="${escapeHtml(category)}"${category === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+}
+
+function buildCfCategoryOptionsHtml(selected: string): string {
+  return CF_CATEGORIES.map((category) => {
+    const label = category === '' ? 'CF:未設定' : `CF:${category}`;
+    return '<option value="' + escapeHtml(category) + '"' + (category === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+  }).join('');
 }
 
 async function hashPassword(password: string, salt: string): Promise<string> {
