@@ -4042,8 +4042,12 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     select:focus,button:focus{outline:2px solid rgba(15,76,129,.2);outline-offset:1px;border-color:var(--a)}
     .hero{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:10px;margin-bottom:14px}
     .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:0 1px 0 rgba(15,47,74,.04)}
+    .hero .card{min-height:110px;display:flex;flex-direction:column;justify-content:space-between;gap:10px}
     .k{font-size:12px;color:var(--muted)}
-    .v{font-weight:800;font-size:28px;font-variant-numeric:tabular-nums}
+    .v{font-weight:800;font-size:clamp(20px, 2.2vw, 28px);line-height:1.05;font-variant-numeric:tabular-nums;letter-spacing:-0.03em;overflow-wrap:anywhere;word-break:break-word}
+    .v.net{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+    .v-sign{font-size:clamp(18px, 1.8vw, 24px);line-height:1}
+    .v-amount{display:block}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     .chart-title{font-weight:700;font-size:20px;margin:0 0 8px}
     svg{width:100%;height:auto;display:block}
@@ -4053,7 +4057,7 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     .tip.show{opacity:1;transform:translateY(0)}
     .sr{position:absolute;left:-9999px}
     @media (max-width:980px){.head{grid-template-columns:1fr}.filters{justify-content:flex-start}.grid{grid-template-columns:1fr}.hero{grid-template-columns:1fr 1fr}}
-    @media (max-width:620px){.hero{grid-template-columns:1fr}.v{font-size:24px}}
+    @media (max-width:620px){.hero{grid-template-columns:1fr}.hero .card{min-height:auto}.v{font-size:24px}}
     @media print{body{background:#fff}.card{box-shadow:none}.filters,button{display:none}.wrap{max-width:none;padding:0}.title{font-size:24px}}
   </style>
 </head>
@@ -4075,7 +4079,7 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
   <section class="hero" aria-label="意思決定サマリーカード">
     <article class="card"><div class="k">総入金</div><div id="sum-in" class="v">0</div></article>
     <article class="card"><div class="k">総出金</div><div id="sum-out" class="v">0</div></article>
-    <article class="card"><div class="k">差引</div><div id="sum-net" class="v">0</div></article>
+    <article class="card"><div class="k">差引</div><div id="sum-net" class="v net"><span id="sum-net-sign" class="v-sign">+</span><span id="sum-net-amount" class="v-amount">¥0</span></div></article>
     <article class="card"><div class="k">改善余地 (出金上位3比率)</div><div id="sum-top3" class="v">0%</div></article>
   </section>
   <section class="grid">
@@ -4104,6 +4108,8 @@ const startSel = document.getElementById('start-month');
 const endSel = document.getElementById('end-month');
 const reloadBtn = document.getElementById('reload');
 const tipEl = document.getElementById('chart-tip');
+const sumNetSignEl = document.getElementById('sum-net-sign');
+const sumNetAmountEl = document.getElementById('sum-net-amount');
 function escapeHtml(text){return String(text).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');}
 
 function ymList(fromYear, toYear){const arr=[];for(let y=fromYear;y<=toYear;y++){for(let m=1;m<=12;m++){arr.push(String(y)+'-'+String(m).padStart(2,'0'));}}return arr;}
@@ -4183,7 +4189,8 @@ function updateCards(months, breakdown){
   const top3 = breakdown.slice(0,3).reduce((s,r)=>s+Number(r.amount||0),0);
   document.getElementById('sum-in').textContent = '¥'+fmt.format(income);
   document.getElementById('sum-out').textContent = '¥'+fmt.format(expense);
-  document.getElementById('sum-net').textContent = (net>=0?'+':'-')+'¥'+fmt.format(Math.abs(net));
+  if (sumNetSignEl) sumNetSignEl.textContent = net >= 0 ? '+' : '-';
+  if (sumNetAmountEl) sumNetAmountEl.textContent = '¥' + fmt.format(Math.abs(net));
   document.getElementById('sum-top3').textContent = expense>0 ? Math.round((top3/expense)*100)+'%' : '0%';
 }
 
