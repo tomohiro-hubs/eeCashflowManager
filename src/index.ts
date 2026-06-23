@@ -1,6 +1,5 @@
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
-import iconv from 'iconv-lite';
 import { CASHFLOW_STATEMENT_COLUMNS, CASHFLOW_STATEMENT_ROWS } from './cashflowStatementData';
 
 type Env = {
@@ -854,18 +853,18 @@ app.post('/api/import/rakuraku', async (c) => {
   try {
     const contentType = c.req.header('content-type') ?? '';
     if (!contentType.includes('multipart/form-data')) {
-      return c.json({ ok: false, error: 'Content-Type must be multipart/form-data' }, 415);
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.unsupportedContentType, error: 'Content-Type must be multipart/form-data' }, 415);
     }
     let form: Record<string, unknown>;
     try {
       form = await c.req.parseBody();
     } catch (error) {
       console.error('rakuraku import preview multipart parse failed', { userId: user.id, error });
-      return c.json({ ok: false, error: 'multipart/form-data の解析に失敗しました。' }, 400);
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.multipartParseFailed, error: 'multipart/form-data の解析に失敗しました。' }, 400);
     }
     const file = form.file;
     if (!(file instanceof File)) {
-      return c.json({ ok: false, error: 'CSVファイルがありません。' }, 400);
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.fileMissing, error: 'CSVファイルがありません。' }, 400);
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const text = decodeShiftJisLike(bytes);
@@ -884,7 +883,10 @@ app.post('/api/import/rakuraku', async (c) => {
       incomingRows = parseRakurakuCsvText(text);
     } catch (error) {
       console.error('rakuraku import csv parse failed', { userId: user.id, error });
-      return c.json({ ok: false, error: 'CSVファイルの解析に失敗しました。' }, 400);
+      if (error instanceof CsvImportParseError) {
+        return c.json({ ok: false, errorCode: error.code, error: error.message }, 400);
+      }
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.internalError, error: 'CSVファイルの解析に失敗しました。' }, 400);
     }
 
     const preparedRows: Array<{
@@ -1014,7 +1016,7 @@ app.post('/api/import/rakuraku', async (c) => {
     });
   } catch (error) {
     console.error('rakuraku import preview failed', { userId: user.id, error });
-    return c.json({ ok: false, error: 'CSV解析中にエラーが発生しました。' }, 500);
+    return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.internalError, error: 'CSV解析中にエラーが発生しました。' }, 500);
   }
 });
 
@@ -2105,7 +2107,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .banner.ok { background: var(--ok-bg); border: 1px solid var(--ok-line); color: #155e36; }
 
     .table-wrap { overflow: auto; border: 1px solid #e1e8f0; border-radius: 10px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1320px; background: #fff; }
+    table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
     th, td { border-bottom: 1px solid #e7edf4; text-align: left; padding: 9px 8px; vertical-align: middle; }
     #rows th,
     #rows td {
@@ -2139,6 +2141,12 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .detail-row td { background: #f8fbff; color: #3a4a5e; font-size: 12px; }
     .bulk-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
     .bulk-bar .muted { font-size: 12px; }
+    .column-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fbff; }
+    .column-toolbar .muted { font-size: 12px; font-weight: 700; color: #48617a; }
+    .column-toggle-group { display: flex; gap: 6px; flex-wrap: wrap; }
+    .column-toggle { padding: 6px 9px; font-size: 12px; border: 1px solid #c7d4e3; background: #fff; }
+    .column-toggle.is-hidden { background: #eef3f8; color: var(--muted); border-color: #d6e0ea; }
+    .is-hidden-col { display: none !important; }
     .action-row { display: flex; gap: 4px; flex-wrap: nowrap; }
     .actions button, .actions select { padding: 5px 6px; font-size: 11px; min-width: 0; white-space: nowrap; }
     .label-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 6px; border: 1px solid rgba(0,0,0,.15); vertical-align: middle; }
@@ -2438,6 +2446,21 @@ function renderAppPage(email: string, isAdmin: boolean) {
       <button id="csv-help-trigger" class="help-icon" type="button" title="CSV入力規則を表示">ⓘ</button>
       <span id="list-filter-caption" class="muted"></span>
     </div>
+    <div class="column-toolbar" aria-label="予定一覧の列表示切り替え">
+      <span class="muted">列の表示</span>
+      <div class="column-toggle-group">
+        <button type="button" class="column-toggle" data-list-col-toggle="label">ラベル</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="cf_category">CF区分</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="note">メモ</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="actual_date">入出金日</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="customer_name">顧客名</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="staff_name">担当</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="running">残高</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="actions">操作</button>
+      </div>
+      <button id="list-columns-collapse" type="button" class="secondary">詳細を折りたたむ</button>
+      <button id="list-columns-reset" type="button" class="secondary">すべて表示</button>
+    </div>
     <div class="bulk-bar">
       <button id="bulk-select-visible" type="button">表示中を選択</button>
       <button id="bulk-clear-selection" type="button">選択解除</button>
@@ -2449,7 +2472,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     </div>
     <div id="list-section-body" class="table-wrap">
       <table>
-        <thead><tr><th></th><th>#</th><th>ラベル</th><th>予定日</th><th>区分</th><th>CF区分</th><th>件名</th><th>金額</th><th>メモ</th><th>入出金日</th><th>顧客名</th><th>担当</th><th>残高</th><th>操作</th><th>選択</th></tr></thead>
+        <thead><tr><th data-list-col="toggle"></th><th data-list-col="index">#</th><th data-list-col="label">ラベル</th><th data-list-col="scheduled_date">予定日</th><th data-list-col="type">区分</th><th data-list-col="cf_category">CF区分</th><th data-list-col="title">件名</th><th data-list-col="amount">金額</th><th data-list-col="note">メモ</th><th data-list-col="actual_date">入出金日</th><th data-list-col="customer_name">顧客名</th><th data-list-col="staff_name">担当</th><th data-list-col="running">残高</th><th data-list-col="actions">操作</th><th data-list-col="select">選択</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -2625,10 +2648,12 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const listFilterTypeEl = document.getElementById('list-filter-type');
   const listFilterCompletedEl = document.getElementById('list-filter-completed');
   const listFilterLabelEl = document.getElementById('list-filter-label');
-  const listFilterResetBtn = document.getElementById('list-filter-reset');
-  const exportCsvBtn = document.getElementById('export-csv');
-  const listFilterCaptionEl = document.getElementById('list-filter-caption');
-  const bulkSelectVisibleBtn = document.getElementById('bulk-select-visible');
+    const listFilterResetBtn = document.getElementById('list-filter-reset');
+    const exportCsvBtn = document.getElementById('export-csv');
+    const listFilterCaptionEl = document.getElementById('list-filter-caption');
+    const listColumnsCollapseBtn = document.getElementById('list-columns-collapse');
+    const listColumnsResetBtn = document.getElementById('list-columns-reset');
+    const bulkSelectVisibleBtn = document.getElementById('bulk-select-visible');
   const bulkClearSelectionBtn = document.getElementById('bulk-clear-selection');
   const bulkEditDateBtn = document.getElementById('bulk-edit-date');
   const bulkEditActualDateBtn = document.getElementById('bulk-edit-actual-date');
@@ -2728,6 +2753,94 @@ function renderAppPage(email: string, isAdmin: boolean) {
     const nextSelected = options.includes(selected) ? selected : '';
     entryCfCategoryEl.innerHTML = buildEntryCfCategoryOptionsHtml(nextSelected, type);
     entryCfCategoryEl.value = nextSelected;
+  }
+
+  const LIST_COLUMN_STORAGE_KEY = 'cashflow-list-hidden-columns-v1';
+  const LIST_COLUMN_HIDE_PRESET = ['label', 'cf_category', 'note', 'actual_date', 'customer_name', 'staff_name', 'running', 'actions'];
+  const LIST_COLUMN_LABELS = new Map([
+    ['label', 'ラベル'],
+    ['cf_category', 'CF区分'],
+    ['note', 'メモ'],
+    ['actual_date', '入出金日'],
+    ['customer_name', '顧客名'],
+    ['staff_name', '担当'],
+    ['running', '残高'],
+    ['actions', '操作']
+  ]);
+  let hiddenListColumns = loadHiddenListColumns();
+
+  function loadHiddenListColumns() {
+    try {
+      const raw = localStorage.getItem(LIST_COLUMN_STORAGE_KEY);
+      if (!raw) return new Set(LIST_COLUMN_HIDE_PRESET);
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set();
+      return new Set(parsed.filter((v) => typeof v === 'string' && LIST_COLUMN_LABELS.has(v)));
+    } catch (_) {
+      return new Set(LIST_COLUMN_HIDE_PRESET);
+    }
+  }
+
+  function saveHiddenListColumns() {
+    try {
+      localStorage.setItem(LIST_COLUMN_STORAGE_KEY, JSON.stringify([...hiddenListColumns]));
+    } catch (_) {
+      // localStorage が使えない環境では保存を諦める
+    }
+  }
+
+  function setListColumnHidden(key, hidden) {
+    if (!LIST_COLUMN_LABELS.has(key)) return;
+    if (hidden) hiddenListColumns.add(key);
+    else hiddenListColumns.delete(key);
+    saveHiddenListColumns();
+    syncListColumnToggleUi();
+    applyListColumnVisibility();
+  }
+
+  function collapseDetailColumns() {
+    hiddenListColumns = new Set(LIST_COLUMN_HIDE_PRESET);
+    saveHiddenListColumns();
+    syncListColumnToggleUi();
+    applyListColumnVisibility();
+  }
+
+  function showAllListColumns() {
+    hiddenListColumns = new Set();
+    saveHiddenListColumns();
+    syncListColumnToggleUi();
+    applyListColumnVisibility();
+  }
+
+  function syncListColumnToggleUi() {
+    document.querySelectorAll('[data-list-col-toggle]').forEach((btn) => {
+      if (!(btn instanceof HTMLButtonElement)) return;
+      const key = String(btn.dataset.listColToggle || '');
+      const label = LIST_COLUMN_LABELS.get(key) || key;
+      const hidden = hiddenListColumns.has(key);
+      btn.classList.toggle('is-hidden', hidden);
+      btn.setAttribute('aria-pressed', hidden ? 'true' : 'false');
+      btn.textContent = label;
+      btn.title = hidden ? label + 'を表示' : label + 'を非表示';
+    });
+    if (listColumnsResetBtn instanceof HTMLButtonElement) {
+      listColumnsResetBtn.disabled = hiddenListColumns.size === 0;
+    }
+    if (listColumnsCollapseBtn instanceof HTMLButtonElement) {
+      listColumnsCollapseBtn.disabled = LIST_COLUMN_HIDE_PRESET.every((key) => hiddenListColumns.has(key));
+    }
+  }
+
+  function applyListColumnVisibility() {
+    const table = document.getElementById('list-section-body');
+    if (!table) return;
+    table.querySelectorAll('[data-list-col]').forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const key = String(el.dataset.listCol || '');
+      if (!key || !LIST_COLUMN_LABELS.has(key)) return;
+      el.classList.toggle('is-hidden-col', hiddenListColumns.has(key));
+    });
+    syncListColumnToggleUi();
   }
 
   function validatePayload(payload) {
@@ -3068,22 +3181,22 @@ function renderAppPage(email: string, isAdmin: boolean) {
         : '';
 
       return '<tr' + rowClass + '>' +
-        '<td class="toggle-cell">' + toggleButton + '</td>' +
-        '<td>' + (idx + 1) + '</td>' +
-        '<td>' +
+        '<td class="toggle-cell" data-list-col="toggle">' + toggleButton + '</td>' +
+        '<td data-list-col="index">' + (idx + 1) + '</td>' +
+        '<td data-list-col="label">' +
           '<span class="label-dot label-' + escapeHtml(String(e.label_color || 'blue')) + '"></span>' +
         '</td>' +
-        '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
-        '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
-        '<td>' + escapeHtml(e.cf_category || '未設定') + '</td>' +
-        '<td>' + escapeHtml(e.title) + '</td>' +
-        '<td class="amount ' + e.type + '">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
-        '<td>' + escapeHtml(e.note || '') + '</td>' +
-        '<td>' + escapeHtml(e.actual_transaction_date || '') + '</td>' +
-        '<td>' + escapeHtml(e.customer_name || '') + '</td>' +
-        '<td>' + escapeHtml(e.staff_name || '') + '</td>' +
-        '<td class="running ' + runningClass + '">' + (entryRunning > 0 ? '+' : '') + fmt.format(entryRunning) + '</td>' +
-        '<td class="actions">' +
+        '<td data-list-col="scheduled_date">' + escapeHtml(e.scheduled_date) + '</td>' +
+        '<td data-list-col="type">' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
+        '<td data-list-col="cf_category">' + escapeHtml(e.cf_category || '未設定') + '</td>' +
+        '<td data-list-col="title">' + escapeHtml(e.title) + '</td>' +
+        '<td class="amount ' + e.type + '" data-list-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
+        '<td data-list-col="note">' + escapeHtml(e.note || '') + '</td>' +
+        '<td data-list-col="actual_date">' + escapeHtml(e.actual_transaction_date || '') + '</td>' +
+        '<td data-list-col="customer_name">' + escapeHtml(e.customer_name || '') + '</td>' +
+        '<td data-list-col="staff_name">' + escapeHtml(e.staff_name || '') + '</td>' +
+        '<td class="running ' + runningClass + '" data-list-col="running">' + (entryRunning > 0 ? '+' : '') + fmt.format(entryRunning) + '</td>' +
+        '<td class="actions" data-list-col="actions">' +
           '<div class="action-row">' +
             '<button type="button" data-move="top" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>先頭</button>' +
             '<button type="button" data-move="up" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>上</button>' +
@@ -3108,9 +3221,10 @@ function renderAppPage(email: string, isAdmin: boolean) {
             '</select>' +
           '</div>' +
         '</td>' +
-        '<td class="select-cell"><input type="checkbox" data-select-id="' + e.id + '"' + (selectedEntryIds.has(Number(e.id)) ? ' checked' : '') + ' /></td>' +
+        '<td class="select-cell" data-list-col="select"><input type="checkbox" data-select-id="' + e.id + '"' + (selectedEntryIds.has(Number(e.id)) ? ' checked' : '') + ' /></td>' +
       '</tr>' + detailRow;
     }).join('');
+    applyListColumnVisibility();
     updateBulkSelectionCaption();
   }
 
@@ -3797,6 +3911,21 @@ function renderAppPage(email: string, isAdmin: boolean) {
     renderRows();
     updateSelectedMonthAlert();
   });
+  document.querySelectorAll('[data-list-col-toggle]').forEach((btn) => {
+    if (!(btn instanceof HTMLButtonElement)) return;
+    btn.addEventListener('click', () => {
+      const key = String(btn.dataset.listColToggle || '');
+      setListColumnHidden(key, !hiddenListColumns.has(key));
+    });
+  });
+  listColumnsCollapseBtn?.addEventListener('click', () => {
+    collapseDetailColumns();
+  });
+  listColumnsResetBtn?.addEventListener('click', () => {
+    showAllListColumns();
+  });
+  syncListColumnToggleUi();
+  applyListColumnVisibility();
 
   exportCsvBtn?.addEventListener('click', () => {
     const filtered = getFilteredEntries();
@@ -5219,18 +5348,30 @@ function parseNullableInt(value: unknown): number | null {
 }
 
 function decodeShiftJisLike(bytes: Uint8Array): string {
+  const candidates = ['windows-31j', 'utf-8', 'shift_jis'] as const;
+  const headerHints = ['入出金管理No', '案件名', '予定日', 'ID', '区分', '件名', '金額'];
+  let bestText = '';
+  let bestScore = -1;
+
   try {
-    // Buffer.from で Buffer に変換し、iconv.decode で windows-31j (CP932) としてデコードします
-    // 明示的に node:buffer から Buffer をインポートしたため、確実に動作します
-    return iconv.decode(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), 'windows-31j');
-  } catch (error) {
-    console.error('iconv-lite decode failed, fallback to TextDecoder. Error details:', error);
-    try {
-      return new TextDecoder('windows-31j', { fatal: false }).decode(bytes);
-    } catch {
-      return new TextDecoder().decode(bytes);
+    for (const encoding of candidates) {
+      try {
+        const text = new TextDecoder(encoding, { fatal: false }).decode(bytes);
+        const score = headerHints.reduce((sum, hint) => sum + (text.includes(hint) ? 1 : 0), 0);
+        if (score > bestScore) {
+          bestText = text;
+          bestScore = score;
+        }
+      } catch (error) {
+        console.error(`decode failed for ${encoding}, continue fallback`, error);
+      }
     }
+    if (bestText) return bestText;
+  } catch (error) {
+    console.error('multi-encoding decode failed, fallback to utf-8. Error details:', error);
   }
+
+  return new TextDecoder().decode(bytes);
 }
 
 function parseCsvLineSimple(line: string): string[] {

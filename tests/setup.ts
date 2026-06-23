@@ -54,6 +54,7 @@ const setupStatements = [
     customer_name TEXT,
     staff_name TEXT,
     label_color TEXT NOT NULL DEFAULT '',
+    cf_category TEXT NOT NULL DEFAULT '',
     import_source_file_name TEXT,
     import_management_no TEXT,
     import_batch_id TEXT,

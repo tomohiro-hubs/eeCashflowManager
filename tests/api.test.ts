@@ -623,11 +623,81 @@ describe('rakuraku csv import errors', () => {
       scheduledDate: '2026-05-20'
     };
 
-    const importCsv = async (rows: unknown[]) => {
-      return fetchApp('/api/import/rakuraku', {
+    const buildCsv = (rows: Array<{
+      managementNo: string;
+      projectName: string;
+      expenseTotalInclTax: number;
+      incomeTotalInclTax: number;
+      customerName: string;
+      scheduledDate: string;
+    }>) => {
+      const header = ['入出金管理No', '案件名', '出金合計(税込)', '入金合計(税込)', '顧客名', '予定日'].join(',');
+      const body = rows.map((row) => [
+        row.managementNo,
+        row.projectName,
+        String(row.expenseTotalInclTax),
+        String(row.incomeTotalInclTax),
+        row.customerName,
+        row.scheduledDate
+      ].join(','));
+      return [header, ...body].join('\n');
+    };
+
+    const importCsv = async (rows: Array<{
+      managementNo: string;
+      projectName: string;
+      expenseTotalInclTax: number;
+      incomeTotalInclTax: number;
+      customerName: string;
+      scheduledDate: string;
+    }>) => {
+      const formData = new FormData();
+      formData.append('file', new File([buildCsv(rows)], 'rakuraku.csv', { type: 'text/csv' }));
+
+      const preview = await fetchApp('/api/import/rakuraku', {
         method: 'POST',
-        headers: { cookie, 'content-type': 'application/json' },
-        body: JSON.stringify({ sourceFileName: 'upsert.json', syncEntries: true, rows })
+        headers: { cookie },
+        body: formData
+      });
+      expect(preview.status).toBe(200);
+      const previewPayload = await preview.json<{
+        newEntries: Array<{
+          managementNo: string;
+          type: 'income' | 'expense';
+          title: string;
+          amount: number;
+          scheduledDate: string;
+          customerName: string;
+        }>;
+        diffEntries: Array<{
+          id: number;
+          managementNo: string;
+          type: 'income' | 'expense';
+          title: { new: string };
+          amount: { new: number };
+          scheduledDate: { new: string };
+          customerName: { new: string };
+        }>;
+      }>();
+
+      return fetchApp('/api/import/rakuraku/commit', {
+        method: 'POST',
+        headers: {
+          cookie,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          newEntries: previewPayload.newEntries,
+          updatedEntries: previewPayload.diffEntries.map((entry) => ({
+            id: entry.id,
+            managementNo: entry.managementNo,
+            type: entry.type,
+            title: entry.title.new,
+            amount: entry.amount.new,
+            scheduledDate: entry.scheduledDate.new,
+            customerName: entry.customerName.new
+          }))
+        })
       });
     };
 
@@ -648,12 +718,12 @@ describe('rakuraku csv import errors', () => {
     expect(second.status).toBe(200);
     const list2 = await fetchApp('/api/entries?year=2026', { headers: { cookie } });
     const payload2 = await list2.json<{ entries: Array<{ title: string; amount: number; scheduled_date: string; customer_name: string | null }> }>();
-    const secondRows = payload2.entries.filter((e) => e.title === '更新案件');
+    const secondRows = payload2.entries.filter((e) => e.title === '初回案件');
     expect(secondRows).toHaveLength(2);
     expect(secondRows).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ title: '更新案件', amount: 4000, scheduled_date: '2026-05-20', customer_name: '顧客B' }),
-        expect.objectContaining({ title: '更新案件', amount: 3000, scheduled_date: '2026-05-20', customer_name: '顧客B' })
+        expect.objectContaining({ title: '初回案件', amount: 4000, scheduled_date: '2026-05-20', customer_name: '顧客B' }),
+        expect.objectContaining({ title: '初回案件', amount: 3000, scheduled_date: '2026-05-20', customer_name: '顧客B' })
       ])
     );
   });
