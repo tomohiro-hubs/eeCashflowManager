@@ -729,3 +729,74 @@ describe('rakuraku csv import errors', () => {
   });
 
 });
+
+describe('cashflow backups', () => {
+  it('creates a backup and restores the current organization entries', async () => {
+    const orgId = await createOrganization('backup-org');
+    const cookie = await createAuthedCookie('admin@example.com', { organizationId: orgId, role: 'owner', isAdmin: true });
+
+    await createEntry(cookie, {
+      title: 'Before backup income',
+      amount: 12000,
+      type: 'income',
+      scheduledDate: '2026-04-10'
+    });
+    await createEntry(cookie, {
+      title: 'Before backup expense',
+      amount: 3400,
+      type: 'expense',
+      scheduledDate: '2026-04-11'
+    });
+
+    const backupRunRes = await fetchApp('/admin/backups/run', {
+      method: 'POST',
+      headers: { cookie }
+    });
+    expect(backupRunRes.status).toBe(302);
+
+    const backupRows = await env.DB.prepare(
+      `SELECT id, entry_count, source, snapshot_json
+       FROM cashflow_entry_backups
+       WHERE organization_id = ?
+       ORDER BY id DESC`
+    )
+      .bind(orgId)
+      .all<{ id: number; entry_count: number; source: 'manual' | 'scheduled'; snapshot_json: string }>();
+
+    expect(backupRows.results).toHaveLength(1);
+    const backup = backupRows.results?.[0];
+    expect(backup?.entry_count).toBe(2);
+    expect(backup?.source).toBe('manual');
+
+    await fetchApp('/api/entries', {
+      method: 'DELETE',
+      headers: { cookie }
+    });
+
+    await createEntry(cookie, {
+      title: 'Interim entry',
+      amount: 7777,
+      type: 'income',
+      scheduledDate: '2026-04-12'
+    });
+
+    const restoreRes = await fetchApp(`/admin/backups/${backup?.id}/restore`, {
+      method: 'POST',
+      headers: { cookie }
+    });
+    expect(restoreRes.status).toBe(302);
+
+    const listRes = await fetchApp('/api/entries?year=2026', {
+      headers: { cookie }
+    });
+    expect(listRes.status).toBe(200);
+    const payload = await listRes.json<{ entries: Array<{ title: string; amount: number; type: 'income' | 'expense' }> }>();
+    expect(payload.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: 'Before backup income', amount: 12000, type: 'income' }),
+        expect.objectContaining({ title: 'Before backup expense', amount: 3400, type: 'expense' })
+      ])
+    );
+    expect(payload.entries.some((entry) => entry.title === 'Interim entry')).toBe(false);
+  });
+});

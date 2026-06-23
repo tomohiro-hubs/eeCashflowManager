@@ -90,6 +90,19 @@ const setupStatements = [
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS cashflow_entry_backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('manual', 'scheduled')),
+    snapshot_json TEXT NOT NULL,
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    created_by_user_id INTEGER,
+    restored_at TEXT,
+    restored_by_user_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user_month_order
    ON cashflow_entries(user_id, scheduled_date, order_index)`,
   `CREATE INDEX IF NOT EXISTS idx_entries_org_month_order
@@ -98,6 +111,8 @@ const setupStatements = [
    ON organization_members(organization_id, user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_audits_user_entry_changed_desc
    ON cashflow_entry_audits(user_id, entry_id, changed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_cashflow_entry_backups_org_created_desc
+   ON cashflow_entry_backups(organization_id, created_at DESC, id DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user_sample
    ON cashflow_entries(user_id, is_sample, scheduled_date, order_index, id)`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user_completed
@@ -247,6 +262,7 @@ beforeEach(async () => {
   await env.DB.prepare('DELETE FROM rakuraku_cashflow_import_rows').run();
   await env.DB.prepare('DELETE FROM rakuraku_cashflow_import_batches').run();
   await env.DB.prepare('DELETE FROM password_reset_tokens').run();
+  await env.DB.prepare('DELETE FROM cashflow_entry_backups').run();
   await env.DB.prepare('DELETE FROM cashflow_entry_audits').run();
   await env.DB.prepare('DELETE FROM cashflow_entries').run();
   await env.DB.prepare('DELETE FROM users').run();

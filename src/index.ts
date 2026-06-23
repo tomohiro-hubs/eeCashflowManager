@@ -7,6 +7,19 @@ type Env = {
 };
 
 type User = { id: number; email: string; isAdmin: boolean; organizationId: number | null };
+type CashflowEntryBackupSource = 'manual' | 'scheduled';
+type CashflowEntryBackupListRow = {
+  id: number;
+  organization_id: number;
+  source: CashflowEntryBackupSource;
+  entry_count: number;
+  created_at: string;
+  created_by_email: string | null;
+  restored_at: string | null;
+  restored_by_email: string | null;
+};
+
+const CASHFLOW_BACKUP_RETENTION_DAYS = 7;
 
 const app = new Hono<{ Bindings: Env; Variables: { user: User | null } }>();
 const SESSION_COOKIE = 'cf_cashflow_session';
@@ -386,6 +399,64 @@ app.get('/audit', async (c) => {
   if (!user) return c.redirect('/login');
   if (!user.isAdmin) return c.text('Forbidden', 403);
   return c.html(renderAuditPage(user.email));
+});
+
+app.get('/admin/backups', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { user, organizationId } = auth;
+  if (!user.isAdmin) return c.text('Forbidden', 403);
+
+  const backups = await listCashflowEntryBackups(c.env.DB, organizationId);
+  const status = String(c.req.query('status') ?? '').trim();
+  return c.html(renderBackupsPage(user.email, backups, status));
+});
+
+app.post('/admin/backups/run', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { user, organizationId } = auth;
+  if (!user.isAdmin) return c.text('Forbidden', 403);
+
+  try {
+    const backup = await createCashflowEntryBackup(c.env.DB, organizationId, user.id, 'manual');
+    await pruneCashflowEntryBackups(c.env.DB);
+    if (backup) {
+      await c.env.DB.prepare(
+        `INSERT INTO user_operation_logs (user_id, action_type, target_type, detail)
+         VALUES (?, 'add', 'cashflow_entry_backup', ?)`
+      ).bind(user.id, JSON.stringify({ organizationId, source: 'manual' })).run();
+    }
+    return c.redirect(`/admin/backups?status=${backup ? 'created' : 'empty'}`);
+  } catch (error) {
+    console.error('cashflow backup create failed', { userId: user.id, organizationId, error });
+    return c.html(renderBackupsPage(user.email, await listCashflowEntryBackups(c.env.DB, organizationId), 'バックアップ作成に失敗しました。'), 500);
+  }
+});
+
+app.post('/admin/backups/:id/restore', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { user, organizationId } = auth;
+  if (!user.isAdmin) return c.text('Forbidden', 403);
+
+  const backupId = Number(c.req.param('id'));
+  if (!Number.isInteger(backupId) || backupId <= 0) {
+    return c.text('Invalid backup id', 400);
+  }
+
+  try {
+    const restoredCount = await restoreCashflowEntryBackup(c.env.DB, backupId, organizationId, user.id);
+    await pruneCashflowEntryBackups(c.env.DB);
+    await c.env.DB.prepare(
+      `INSERT INTO user_operation_logs (user_id, action_type, target_type, detail)
+       VALUES (?, 'edit', 'cashflow_entry_backup_restore', ?)`
+    ).bind(user.id, JSON.stringify({ backupId, organizationId, restoredCount })).run();
+    return c.redirect('/admin/backups?status=restored');
+  } catch (error) {
+    console.error('cashflow backup restore failed', { userId: user.id, organizationId, backupId, error });
+    return c.html(renderBackupsPage(user.email, await listCashflowEntryBackups(c.env.DB, organizationId), 'バックアップ復元に失敗しました。'), 500);
+  }
 });
 
 app.get('/password-change', async (c) => {
@@ -2285,6 +2356,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     <div style="display:flex; gap:8px; align-items:center;">
       <a href="/cashflow-statement" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">資金繰り表</a>
       <a href="/fiscal" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">年間サマリー</a>
+      ${isAdmin ? '<a href="/admin/backups" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">バックアップ</a>' : ''}
       ${isAdmin ? '<a href="/audit" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">監査ログ</a>' : ''}
       <form method="post" action="/logout" style="display:inline-flex;">
         <button class="secondary">ログアウト</button>
@@ -4070,6 +4142,7 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     </div>
     <div class="filters" aria-label="決算期間選択">
       <a href="/app" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">Cashflow Managerへ戻る</a>
+      ${isAdmin ? '<a href="/admin/backups" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">バックアップ</a>' : ''}
       ${isAdmin ? '<a href="/audit" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">監査ログ</a>' : ''}
       <select id="start-month" aria-label="開始月"></select>
       <select id="end-month" aria-label="終了月"></select>
@@ -4871,6 +4944,7 @@ function renderAuditPage(email: string) {
     <div class="actions">
       <a href="/app">Cashflow Managerへ戻る</a>
       <a href="/fiscal">Fiscal Studio</a>
+      <a href="/admin/backups">バックアップ</a>
     </div>
   </header>
 
@@ -4998,6 +5072,107 @@ function renderAuditPage(email: string) {
 </html>`;
 }
 
+function renderBackupsPage(email: string, backups: CashflowEntryBackupListRow[], status?: string) {
+  const statusText = status === 'created'
+    ? 'バックアップを作成しました。'
+    : status === 'restored'
+      ? 'バックアップを復元しました。'
+      : status === 'empty'
+        ? 'バックアップ対象の明細がありませんでした。'
+        : '';
+  return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>バックアップ管理 | Cashflow</title>
+  <style>
+    :root { --bg:#eef2f6; --panel:#fff; --line:#d4dde7; --text:#1d2733; --muted:#5e7188; --accent:#0f4c81; --accent-deep:#0b3558; --ok-bg:#edf9f1; --ok-line:#bce7cb; --warn-bg:#fff4db; --warn-line:#f3d28a; --shadow:0 6px 20px rgba(10,36,64,.08); }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:"Noto Sans JP","Hiragino Sans",sans-serif;background:linear-gradient(180deg,#f7f9fc 0%, var(--bg) 100%);color:var(--text)}
+    .wrap{max-width:1180px;margin:0 auto;padding:18px 16px 36px}
+    .head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+    .title{font-size:30px;font-weight:700}
+    .sub{font-size:13px;color:var(--muted)}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    .actions a,.actions button,.actions input,.actions select{padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:var(--text);font-size:14px;text-decoration:none}
+    .actions button{cursor:pointer}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 0 rgba(15,47,74,.04)}
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .banner{border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:13px}
+    .banner.ok{background:var(--ok-bg);border:1px solid var(--ok-line);color:#155e36}
+    .banner.warn{background:var(--warn-bg);border:1px solid var(--warn-line);color:#7a5300}
+    .muted{color:var(--muted)}
+    .table-wrap{overflow:auto;border:1px solid #e1e8f0;border-radius:10px;margin-top:10px}
+    table{width:100%;border-collapse:collapse;font-size:13px;min-width:860px}
+    th,td{border-bottom:1px solid #e7edf4;text-align:left;padding:9px 8px;vertical-align:top}
+    th{background:#f5f8fb;font-weight:700;color:#334e68}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+    .pill.manual{background:#eef4ff;color:#265d9c}
+    .pill.scheduled{background:#edf9f1;color:#155e36}
+    .restore-form{display:inline-flex}
+    .restore-form button{border:1px solid #b9c8d9;border-radius:8px;background:#fff;padding:8px 10px;font-size:13px;cursor:pointer}
+    .empty{padding:18px;color:var(--muted);text-align:center}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header class="head">
+    <div>
+      <div class="title">バックアップ管理</div>
+      <div class="sub">明細だけを毎日23:59(JST)に自動保存し、${CASHFLOW_BACKUP_RETENTION_DAYS}日で自動削除します | ${escapeHtml(email)}</div>
+    </div>
+    <div class="actions">
+      <a href="/app">Cashflow Managerへ戻る</a>
+      <a href="/fiscal">Fiscal Studio</a>
+      <a href="/audit">監査ログ</a>
+    </div>
+  </header>
+
+  <section class="panel">
+    ${statusText ? `<div class="banner ${status === 'empty' ? 'warn' : 'ok'}">${escapeHtml(statusText)}</div>` : ''}
+    <div class="toolbar">
+      <form method="post" action="/admin/backups/run">
+        <button type="submit">今すぐバックアップ</button>
+      </form>
+      <span class="muted">復元は現在の明細を上書きします。必要なときだけ実行してください。</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="toolbar">
+      <strong>保存済みバックアップ</strong>
+      <span class="muted">最新順で表示</span>
+    </div>
+    <div class="table-wrap">
+      ${backups.length > 0 ? `
+      <table>
+        <thead><tr><th>作成日時</th><th>件数</th><th>種別</th><th>作成者</th><th>復元日時</th><th>操作</th></tr></thead>
+        <tbody>
+          ${backups.map((backup) => `
+            <tr>
+              <td>${escapeHtml(formatJstDateTime(backup.created_at))}</td>
+              <td>${escapeHtml(formatNumber(backup.entry_count))}</td>
+              <td><span class="pill ${escapeHtml(backup.source)}">${backup.source === 'scheduled' ? '自動' : '手動'}</span></td>
+              <td>${escapeHtml(backup.created_by_email || '-')}</td>
+              <td>${escapeHtml(formatJstDateTime(backup.restored_at))}</td>
+              <td>
+                <form class="restore-form" method="post" action="/admin/backups/${backup.id}/restore" onsubmit="return confirm('このバックアップで現在の明細を上書き復元します。よろしいですか？');">
+                  <button type="submit">このバックアップで復元</button>
+                </form>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      ` : `<div class="empty">まだバックアップはありません。</div>`}
+    </div>
+  </section>
+</main>
+</body>
+</html>`;
+}
+
 function renderPasswordChangePage(email: string, message?: string, success = false) {
   return `<!doctype html>
 <html lang="ja">
@@ -5044,6 +5219,225 @@ function renderPasswordChangePage(email: string, message?: string, success = fal
   </main>
 </body>
 </html>`;
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat('ja-JP').format(Number(value || 0));
+}
+
+function formatJstDateTime(value?: string | null): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '-';
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/);
+  const parsed = new Date(match ? `${match[1]}T${match[2]}Z` : raw);
+  if (Number.isNaN(parsed.getTime())) return '-';
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(parsed);
+}
+
+type CashflowEntryBackupSnapshotRow = {
+  id: number;
+  user_id: number;
+  organization_id: number | null;
+  title: string;
+  amount: number;
+  type: 'income' | 'expense';
+  scheduled_date: string;
+  order_index: number;
+  note: string | null;
+  account_name: string | null;
+  actual_transaction_date: string | null;
+  customer_name: string | null;
+  staff_name: string | null;
+  label_color: string;
+  cf_category: string;
+  import_source_file_name: string | null;
+  import_management_no: string | null;
+  import_batch_id: string | null;
+  is_sample: number;
+  is_completed: number;
+  created_by_user_id: number | null;
+};
+
+async function pruneCashflowEntryBackups(db: D1Database): Promise<void> {
+  await db.prepare(
+    `DELETE FROM cashflow_entry_backups
+     WHERE created_at < datetime('now', '-${CASHFLOW_BACKUP_RETENTION_DAYS} days')`
+  ).run();
+}
+
+async function listCashflowEntryBackups(db: D1Database, organizationId: number): Promise<CashflowEntryBackupListRow[]> {
+  const rows = await db.prepare(
+    `SELECT
+      b.id,
+      b.organization_id,
+      b.source,
+      b.entry_count,
+      b.created_at,
+      b.restored_at,
+      cu.email AS created_by_email,
+      ru.email AS restored_by_email
+     FROM cashflow_entry_backups b
+     LEFT JOIN users cu ON cu.id = b.created_by_user_id
+     LEFT JOIN users ru ON ru.id = b.restored_by_user_id
+     WHERE b.organization_id = ?
+     ORDER BY b.created_at DESC, b.id DESC
+     LIMIT 100`
+  )
+    .bind(organizationId)
+    .all<CashflowEntryBackupListRow>();
+
+  return rows.results ?? [];
+}
+
+async function createCashflowEntryBackup(
+  db: D1Database,
+  organizationId: number,
+  createdByUserId: number | null,
+  source: CashflowEntryBackupSource
+): Promise<CashflowEntryBackupListRow | null> {
+  const rows = await db.prepare(
+    `SELECT
+      id,
+      user_id,
+      organization_id,
+      title,
+      amount,
+      type,
+      scheduled_date,
+      order_index,
+      note,
+      account_name,
+      actual_transaction_date,
+      customer_name,
+      staff_name,
+      label_color,
+      cf_category,
+      import_source_file_name,
+      import_management_no,
+      import_batch_id,
+      is_sample,
+      is_completed,
+      created_by_user_id
+     FROM cashflow_entries
+     WHERE organization_id = ? AND deleted_at IS NULL
+     ORDER BY scheduled_date ASC, order_index ASC, id ASC`
+  )
+    .bind(organizationId)
+    .all<CashflowEntryBackupSnapshotRow>();
+
+  const snapshotRows = rows.results ?? [];
+  if (snapshotRows.length === 0) {
+    return null;
+  }
+
+  const snapshotJson = JSON.stringify(snapshotRows);
+  const insertResult = await db.prepare(
+    `INSERT INTO cashflow_entry_backups
+      (organization_id, source, snapshot_json, entry_count, created_by_user_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+  ).bind(organizationId, source, snapshotJson, snapshotRows.length, createdByUserId).run();
+
+  const backupId = Number(insertResult.meta?.last_row_id ?? 0);
+  const insertedRow = await db.prepare(
+    `SELECT
+      b.id,
+      b.organization_id,
+      b.source,
+      b.entry_count,
+      b.created_at,
+      b.restored_at,
+      cu.email AS created_by_email,
+      ru.email AS restored_by_email
+     FROM cashflow_entry_backups b
+     LEFT JOIN users cu ON cu.id = b.created_by_user_id
+     LEFT JOIN users ru ON ru.id = b.restored_by_user_id
+     WHERE b.id = ? AND b.organization_id = ?`
+  )
+    .bind(backupId, organizationId)
+    .first<CashflowEntryBackupListRow>();
+
+  return insertedRow ?? null;
+}
+
+async function restoreCashflowEntryBackup(db: D1Database, backupId: number, organizationId: number, restoredByUserId: number): Promise<number> {
+  const backup = await db.prepare(
+    `SELECT snapshot_json
+     FROM cashflow_entry_backups
+     WHERE id = ? AND organization_id = ?`
+  )
+    .bind(backupId, organizationId)
+    .first<{ snapshot_json: string }>();
+
+  if (!backup) {
+    throw new Error('Backup not found');
+  }
+
+  let parsed: CashflowEntryBackupSnapshotRow[];
+  try {
+    parsed = JSON.parse(backup.snapshot_json) as CashflowEntryBackupSnapshotRow[];
+  } catch {
+    throw new Error('Invalid backup snapshot');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('Invalid backup snapshot');
+  }
+
+  const statements = [
+    db.prepare(
+      `UPDATE cashflow_entries
+       SET deleted_at = datetime('now'),
+           updated_at = datetime('now')
+       WHERE organization_id = ? AND deleted_at IS NULL`
+    ).bind(organizationId),
+    ...parsed.map((row) =>
+      db.prepare(
+        `INSERT INTO cashflow_entries
+          (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
+           actual_transaction_date, customer_name, staff_name, label_color, cf_category, import_source_file_name,
+           import_management_no, import_batch_id, is_sample, is_completed, created_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        row.user_id,
+        organizationId,
+        row.title,
+        row.amount,
+        row.type,
+        row.scheduled_date,
+        row.order_index,
+        row.note,
+        row.account_name,
+        row.actual_transaction_date,
+        row.customer_name,
+        row.staff_name,
+        row.label_color,
+        row.cf_category,
+        row.import_source_file_name,
+        row.import_management_no,
+        row.import_batch_id,
+        row.is_sample,
+        row.is_completed,
+        row.created_by_user_id ?? restoredByUserId
+      )
+    ),
+    db.prepare(
+      `UPDATE cashflow_entry_backups
+       SET restored_at = datetime('now'),
+           restored_by_user_id = ?,
+           updated_at = datetime('now')
+       WHERE id = ? AND organization_id = ?`
+    ).bind(restoredByUserId, backupId, organizationId)
+  ];
+
+  await db.batch(statements);
+  return parsed.length;
 }
 
 function normalizeEmail(email: string): string {
@@ -5691,6 +6085,36 @@ function escapeHtml(text: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+async function runScheduledCashflowEntryBackups(db: D1Database): Promise<{ created: number; skipped: number }> {
+  const orgRows = await db.prepare(
+    `SELECT id
+     FROM organizations
+     ORDER BY id ASC`
+  ).all<{ id: number }>();
+
+  let created = 0;
+  let skipped = 0;
+  for (const org of orgRows.results ?? []) {
+    const backup = await createCashflowEntryBackup(db, org.id, null, 'scheduled');
+    if (backup) {
+      created += 1;
+    } else {
+      skipped += 1;
+    }
+  }
+  await pruneCashflowEntryBackups(db);
+  return { created, skipped };
+}
+
+export async function scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+  try {
+    const result = await runScheduledCashflowEntryBackups(env.DB);
+    console.log('cashflow backup scheduled job completed', result);
+  } catch (error) {
+    console.error('cashflow backup scheduled job failed', error);
+  }
 }
 
 export default app;
