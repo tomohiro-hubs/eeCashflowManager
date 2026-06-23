@@ -4044,9 +4044,9 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:0 1px 0 rgba(15,47,74,.04)}
     .hero .card{min-height:110px;display:flex;flex-direction:column;justify-content:space-between;gap:10px}
     .k{font-size:12px;color:var(--muted)}
-    .v{font-weight:800;font-size:clamp(20px, 2.2vw, 28px);line-height:1.05;font-variant-numeric:tabular-nums;letter-spacing:-0.03em;overflow-wrap:anywhere;word-break:break-word}
-    .v.net{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
-    .v-sign{font-size:clamp(18px, 1.8vw, 24px);line-height:1}
+    .v{font-weight:800;font-size:clamp(16px, 1.45vw, 22px);line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-0.04em;white-space:nowrap}
+    .v.net{display:flex;flex-direction:row;align-items:baseline;gap:6px;white-space:nowrap}
+    .v-sign{font-size:clamp(16px, 1.3vw, 20px);line-height:1}
     .v-amount{display:block}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     .chart-title{font-weight:700;font-size:20px;margin:0 0 8px}
@@ -4057,7 +4057,7 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     .tip.show{opacity:1;transform:translateY(0)}
     .sr{position:absolute;left:-9999px}
     @media (max-width:980px){.head{grid-template-columns:1fr}.filters{justify-content:flex-start}.grid{grid-template-columns:1fr}.hero{grid-template-columns:1fr 1fr}}
-    @media (max-width:620px){.hero{grid-template-columns:1fr}.hero .card{min-height:auto}.v{font-size:24px}}
+    @media (max-width:620px){.hero{grid-template-columns:1fr}.hero .card{min-height:auto}.v{font-size:20px}}
     @media print{body{background:#fff}.card{box-shadow:none}.filters,button{display:none}.wrap{max-width:none;padding:0}.title{font-size:24px}}
   </style>
 </head>
