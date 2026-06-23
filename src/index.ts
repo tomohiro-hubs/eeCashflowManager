@@ -57,6 +57,79 @@ const CF_CATEGORIES = [
   '利息保証料支払',
   'リース債務返済'
 ] as const;
+const CF_INCOME_CATEGORIES = [
+  '現金売上',
+  '売掛金回収',
+  '未収入金・前受金入金',
+  'その他の収入',
+  '売電収入（西予発電所）',
+  '売電収入（府中発電所）',
+  '売電収入（茨城発電所）',
+  '固定性預金払戻し',
+  '銀行借入',
+  'E借入',
+  '売電事業分資金移動',
+  '設備収入（設備売却など）',
+  'その他の財務等収入'
+] as const;
+const CF_EXPENSE_CATEGORIES = [
+  '現金仕入',
+  '買掛金支払',
+  '未払金・前渡金支払',
+  '人件費支出',
+  '家賃等',
+  '固定費',
+  '租税公課',
+  'その他の支出（社長）',
+  'その他の支出（UFJ）',
+  'その他の支出（木下）',
+  'その他の支出（その他）',
+  '銀行借入返済',
+  '設備支出（固定資産投資）',
+  'その他の財務等支出',
+  '利息保証料支払',
+  'リース債務返済'
+] as const;
+const CASHFLOW_STATEMENT_OPERATING_INCOME_CATEGORIES = new Set([
+  '現金売上',
+  '売掛金回収',
+  '未収入金・前受金入金',
+  'その他の収入',
+  '売電収入（西予発電所）',
+  '売電収入（府中発電所）',
+  '売電収入（茨城発電所）'
+]);
+const CASHFLOW_STATEMENT_OPERATING_EXPENSE_CATEGORIES = new Set([
+  '現金仕入',
+  '買掛金支払',
+  '未払金・前渡金支払',
+  '人件費支出',
+  '家賃等',
+  '固定費',
+  '租税公課',
+  'その他の支出（社長）',
+  'その他の支出（UFJ）',
+  'その他の支出（木下）',
+  'その他の支出（その他）'
+]);
+const CASHFLOW_STATEMENT_FINANCING_INCOME_CATEGORIES = new Set([
+  '固定性預金払戻し',
+  '銀行借入',
+  'E借入',
+  '売電事業分資金移動',
+  '設備収入（設備売却など）',
+  'その他の財務等収入'
+]);
+const CASHFLOW_STATEMENT_FINANCING_EXPENSE_CATEGORIES = new Set([
+  '銀行借入返済',
+  '設備支出（固定資産投資）',
+  'その他の財務等支出',
+  '利息保証料支払',
+  'リース債務返済'
+]);
+function getCfCategoriesByEntryType(type: string): readonly string[] {
+  return type === 'expense' ? CF_EXPENSE_CATEGORIES : CF_INCOME_CATEGORIES;
+}
 
 const CSRF_EXEMPT_PATHS = new Set(['/login', '/register', '/forgot-password', '/reset-password']);
 const CSV_IMPORT_ERROR_CODES = {
@@ -174,6 +247,7 @@ app.get('/', (c) => {
 });
 
 app.get('/login', (c) => c.html(renderAuthPage('login')));
+app.get('/login/', (c) => c.redirect('/login'));
 app.get('/register', (c) => c.redirect('/login'));
 
 app.post('/register', async (c) => {
@@ -302,7 +376,10 @@ app.get('/fiscal', async (c) => {
 app.get('/cashflow-statement', async (c) => {
   const user = c.get('user');
   if (!user) return c.redirect('/login');
-  return c.html(renderCashflowStatementPage(user.email, user.isAdmin));
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const cashflowStatementData = await loadCashflowStatementData(c.env.DB, auth.organizationId, 2026, 2031);
+  return c.html(renderCashflowStatementPage(user.email, user.isAdmin, cashflowStatementData));
 });
 
 app.get('/audit', async (c) => {
@@ -699,6 +776,7 @@ app.post('/api/entries', async (c) => {
   const staffName = typeof body.staffName === 'string' ? body.staffName.trim() : '';
   const labelColor = typeof body.labelColor === 'string' ? body.labelColor.trim() : '';
   const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
+  const allowedCfCategories = new Set(['', ...getCfCategoriesByEntryType(typeof body.type === 'string' ? body.type : 'income')]);
 
   const validatedInput = {
     title,
@@ -712,7 +790,7 @@ app.post('/api/entries', async (c) => {
     labelColor,
     cfCategory
   };
-  if (!isValidEntryInput(validatedInput)) {
+  if (!isValidEntryInput(validatedInput, allowedCfCategories)) {
     return c.json({ error: 'Invalid payload' }, 400);
   }
 
@@ -1129,6 +1207,7 @@ app.post('/api/import/cashflow', async (c) => {
       id: header.indexOf('ID'),
       scheduledDate: header.indexOf('予定日'),
       type: header.indexOf('区分'),
+      cfCategory: header.indexOf('CF区分'),
       title: header.indexOf('件名'),
       amount: header.indexOf('金額'),
       note: header.indexOf('メモ'),
@@ -1158,6 +1237,8 @@ app.post('/api/import/cashflow', async (c) => {
       isCompleted: number;
       labelColor: string;
       managementNo: string;
+      cfCategory: string;
+      cfCategorySpecified: boolean;
       rowNum: number;
     }> = [];
 
@@ -1179,6 +1260,7 @@ app.post('/api/import/cashflow', async (c) => {
       const rawCompleted = idx.completed >= 0 ? String(cols[idx.completed] ?? '').trim() : '';
       const rawLabelColor = idx.labelColor >= 0 ? String(cols[idx.labelColor] ?? '').trim() : '';
       const rawManagementNo = idx.managementNo >= 0 ? String(cols[idx.managementNo] ?? '').trim() : '';
+      const rawCfCategory = idx.cfCategory >= 0 ? String(cols[idx.cfCategory] ?? '').trim() : '';
 
       const scheduledDate = parseSlashOrIsoDate(rawScheduledDate);
       if (!scheduledDate) {
@@ -1225,6 +1307,8 @@ app.post('/api/import/cashflow', async (c) => {
         isCompleted,
         labelColor: rawLabelColor || '',
         managementNo: rawManagementNo || '',
+        cfCategory: rawCfCategory || '',
+        cfCategorySpecified: idx.cfCategory >= 0,
         rowNum: i + 1
       });
     }
@@ -1293,7 +1377,9 @@ app.post('/api/import/cashflow', async (c) => {
           c.env.DB.prepare(
             `UPDATE cashflow_entries
              SET scheduled_date = ?, type = ?, title = ?, amount = ?, note = ?, actual_transaction_date = ?,
-                 customer_name = ?, staff_name = ?, is_completed = ?, label_color = ?, import_management_no = ?,
+                 customer_name = ?, staff_name = ?, is_completed = ?, label_color = ?,
+                 cf_category = CASE WHEN ? = 1 THEN ? ELSE cf_category END,
+                 import_management_no = ?,
                  updated_at = datetime('now')
              WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
           ).bind(
@@ -1307,6 +1393,8 @@ app.post('/api/import/cashflow', async (c) => {
             row.staffName || null,
             row.isCompleted,
             row.labelColor || '',
+            row.cfCategorySpecified ? 1 : 0,
+            row.cfCategorySpecified ? (row.cfCategory || null) : null,
             row.managementNo || null,
             idNum,
             organizationId
@@ -1324,8 +1412,8 @@ app.post('/api/import/cashflow', async (c) => {
           c.env.DB.prepare(
             `INSERT INTO cashflow_entries
               (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
-               actual_transaction_date, customer_name, staff_name, label_color, is_sample, is_completed, created_by_user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)`
+               actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?)`
           ).bind(
             user.id,
             organizationId,
@@ -1339,6 +1427,7 @@ app.post('/api/import/cashflow', async (c) => {
             row.customerName || null,
             row.staffName || null,
             row.labelColor || '',
+            row.cfCategory || null,
             row.isCompleted,
             user.id
           )
@@ -1759,7 +1848,15 @@ app.post('/api/entries/:id/cf-category', async (c) => {
   const body = await parseJsonBody<{ cfCategory?: string }>(c);
   if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
   const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
-  const allowedCategories = new Set<string>(CF_CATEGORIES);
+  const entryRow = await c.env.DB.prepare(
+    `SELECT type
+     FROM cashflow_entries
+     WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
+  )
+    .bind(id, organizationId)
+    .first<{ type: 'income' | 'expense' }>();
+  if (!entryRow) return c.json({ error: 'Entry not found' }, 404);
+  const allowedCategories = new Set<string>(['', ...getCfCategoriesByEntryType(entryRow.type)]);
   if (!allowedCategories.has(cfCategory)) return c.json({ error: 'Invalid cf category' }, 400);
 
   const result = await c.env.DB.prepare(
@@ -1965,7 +2062,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     * { box-sizing: border-box; }
     body { margin: 0; font-family: "Noto Sans JP", "Hiragino Sans", sans-serif; background: linear-gradient(180deg, #f7f9fc 0%, var(--bg) 100%); color: var(--text); }
     header { position: sticky; top: 0; z-index: 20; background: linear-gradient(120deg, var(--accent-deep) 0%, #104b77 70%); color: #fff; padding: 14px 20px; box-shadow: var(--shadow); }
-    .head-wrap { max-width: 1520px; margin: 0 auto; display: grid; grid-template-columns: 220px 1fr auto; gap: 18px; align-items: center; }
+    .head-wrap { max-width: 1800px; margin: 0 auto; display: grid; grid-template-columns: 220px 1fr auto; gap: 18px; align-items: center; }
     .brand { min-width: 0; }
     .brand-title { font-size: 20px; font-weight: 700; letter-spacing: .02em; }
     .brand-user { font-size: 12px; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1977,11 +2074,11 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .sum-value.expense { color: #ffd6da; }
     .sum-value.balance.plus { color: #b8ffd4; }
     .sum-value.balance.minus { color: #ffd6da; }
-    .header-warning-slot { max-width: 1520px; margin: 8px auto 0; padding: 0 20px; min-height: 34px; }
+    .header-warning-slot { max-width: 1800px; margin: 8px auto 0; padding: 0 20px; min-height: 34px; }
     .balance-alert { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease, transform .15s ease; font-size: 12px; font-weight: 700; color: #7a5300; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 8px 10px; pointer-events: none; }
     .balance-alert.show { opacity: 1; transform: translateY(0); }
 
-    .main { max-width: 1520px; margin: 18px auto; padding: 0 20px 40px; }
+    .main { max-width: 1800px; margin: 18px auto; padding: 0 20px 40px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 0 rgba(15, 47, 74, 0.04); }
     .topline { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
     .section-toggle { border: 1px solid var(--line); background: #fff; color: var(--text); padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
@@ -2010,7 +2107,12 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .table-wrap { overflow: auto; border: 1px solid #e1e8f0; border-radius: 10px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1320px; background: #fff; }
     th, td { border-bottom: 1px solid #e7edf4; text-align: left; padding: 9px 8px; vertical-align: middle; }
+    #rows th,
+    #rows td {
+      white-space: nowrap;
+    }
     th { position: sticky; top: 0; z-index: 2; background: #f5f8fb; color: #334e68; font-weight: 700; }
+    .table-wrap thead th { white-space: nowrap; }
     tbody tr:hover { background: #fbfdff; }
     tbody tr.completed { background: #f2f4f7; color: #7b8794; }
     tbody tr.completed .amount,
@@ -2020,14 +2122,16 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .amount.expense { color: var(--expense); }
     .running.plus { color: var(--income); font-weight: 700; }
     .running.minus { color: var(--expense); font-weight: 700; }
-    #list-section-body th:nth-child(4),
-    #list-section-body td:nth-child(4) { white-space: nowrap; min-width: 110px; }
-    #list-section-body th:nth-child(5),
-    #list-section-body td:nth-child(5) { white-space: nowrap; min-width: 72px; }
-    #list-section-body th:nth-child(9),
-    #list-section-body td:nth-child(9) { white-space: nowrap; min-width: 110px; }
-    #list-section-body th:nth-child(13),
-    #list-section-body td:nth-child(13) { white-space: nowrap; min-width: 250px; }
+    #rows th:nth-child(4),
+    #rows td:nth-child(4) { white-space: nowrap; min-width: 110px; }
+    #rows th:nth-child(5),
+    #rows td:nth-child(5) { white-space: nowrap; min-width: 72px; }
+    #rows th:nth-child(9),
+    #rows td:nth-child(9) { white-space: nowrap; min-width: 110px; }
+    #rows th:nth-child(13),
+    #rows td:nth-child(13) { white-space: nowrap; min-width: 120px; }
+    #rows th:nth-child(14),
+    #rows td:nth-child(14) { white-space: nowrap; min-width: 210px; }
     .actions { display: flex; flex-direction: column; gap: 4px; min-width: 210px; }
     .select-cell { text-align: center; width: 52px; }
     .toggle-cell { text-align: center; width: 42px; }
@@ -2272,7 +2376,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       <div class="field">
         <label for="f-cf-category">CF区分</label>
         <select id="f-cf-category" name="cfCategory">
-          ${renderCfCategoryOptions('')}
+          ${renderCfCategoryOptions('', 'income')}
         </select>
         <div class="field-hint" data-hint-for="cfCategory">未設定可。後から一覧で修正できます</div>
       </div>
@@ -2385,6 +2489,11 @@ function renderAppPage(email: string, isAdmin: boolean) {
             <td style="padding:8px; border-bottom:1px solid var(--line);"><code>入金</code> または <code>出金</code> を指定してください。</td>
           </tr>
           <tr>
+            <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>CF区分</strong></td>
+            <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--muted);">任意</td>
+            <td style="padding:8px; border-bottom:1px solid var(--line);">資金繰り表に反映する区分です。<code>入金</code>/<code>出金</code> に応じた候補から選びます。空欄のままでも入力できます。</td>
+          </tr>
+          <tr>
             <td style="padding:8px; border-bottom:1px solid var(--line);"><strong>件名</strong></td>
             <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--expense); font-weight:700;">必須</td>
             <td style="padding:8px; border-bottom:1px solid var(--line);">120文字以内で入力してください。</td>
@@ -2481,6 +2590,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const form = document.getElementById('entry-form');
   const statusBanner = document.getElementById('status-banner');
   const submitBtn = document.getElementById('submit-btn');
+  const entryTypeEl = document.getElementById('f-type');
+  const entryCfCategoryEl = document.getElementById('f-cf-category');
   const sumIncomeEl = document.getElementById('sum-income');
   const sumExpenseEl = document.getElementById('sum-expense');
   const sumBalanceEl = document.getElementById('sum-balance');
@@ -2536,6 +2647,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const now = new Date();
   initPeriodSelectors(now);
   syncFormDateWithMonth();
+  syncEntryCfCategoryOptions();
   setMonthCaption();
 
   function initPeriodSelectors(d) {
@@ -2595,6 +2707,29 @@ function renderAppPage(email: string, isAdmin: boolean) {
     }
   }
 
+  function getCfCategoryOptionsByType(type) {
+    return type === 'expense'
+      ? ${JSON.stringify(['', ...CF_EXPENSE_CATEGORIES])}
+      : ${JSON.stringify(['', ...CF_INCOME_CATEGORIES])};
+  }
+
+  function buildEntryCfCategoryOptionsHtml(selected, type) {
+    return getCfCategoryOptionsByType(type).map((category) => {
+      const label = category === '' ? '未設定' : category;
+      return '<option value="' + escapeHtml(category) + '"' + (category === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+  }
+
+  function syncEntryCfCategoryOptions() {
+    if (!entryTypeEl || !entryCfCategoryEl) return;
+    const type = String(entryTypeEl.value || 'income');
+    const selected = String(entryCfCategoryEl.value || '');
+    const options = getCfCategoryOptionsByType(type);
+    const nextSelected = options.includes(selected) ? selected : '';
+    entryCfCategoryEl.innerHTML = buildEntryCfCategoryOptionsHtml(nextSelected, type);
+    entryCfCategoryEl.value = nextSelected;
+  }
+
   function validatePayload(payload) {
     const hints = new Map(Array.from(form.querySelectorAll('.field-hint')).map((el) => [el.dataset.hintFor, el]));
     for (const el of hints.values()) el.classList.remove('error');
@@ -2617,7 +2752,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     }
     const allowedAccounts = new Set(['', '三井住友口座', '和気口座', '那須口座']);
     const allowedColors = new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple']);
-    const allowedCfCategories = new Set(${JSON.stringify([...CF_CATEGORIES])});
+    const allowedCfCategories = new Set(getCfCategoryOptionsByType(payload.type || 'income'));
     if (!allowedAccounts.has(payload.accountName)) {
       const hint = hints.get('accountName'); if (hint) hint.classList.add('error');
       return '口座名はプルダウンから選択してください。';
@@ -2645,6 +2780,13 @@ function renderAppPage(email: string, isAdmin: boolean) {
     return '';
   }
 
+  function buildCfCategoryOptionsHtml(selected, type) {
+    return getCfCategoryOptionsByType(type || 'income').map((category) => {
+      const label = category === '' ? 'CF:未設定' : 'CF:' + category;
+      return '<option value="' + escapeHtml(category) + '"' + (category === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+  }
+
   function updateSummary(summary) {
     const income = Number(summary.income || 0);
     const expense = Number(summary.expense || 0);
@@ -2655,44 +2797,30 @@ function renderAppPage(email: string, isAdmin: boolean) {
     sumBalanceEl.textContent = (balance > 0 ? '+' : '') + fmt.format(balance);
     sumBalanceEl.classList.remove('plus', 'minus');
     sumBalanceEl.classList.add(balance < 0 ? 'minus' : 'plus');
-    balanceAlertEl.textContent = '警告: 今月の差引がマイナスです。資金繰りを確認してください。';
-    balanceAlertEl.classList.toggle('show', balance < 0);
+    if (balance < 0) {
+      balanceAlertEl.textContent = '警告: 今月の差引がマイナスです。資金繰りを確認してください。';
+      balanceAlertEl.classList.add('show');
+    } else {
+      balanceAlertEl.textContent = '';
+      balanceAlertEl.classList.remove('show');
+    }
   }
 
   function updateSelectedMonthAlert() {
-    const monthFilter = String(listFilterMonthEl?.value || 'all');
-    if (monthFilter === 'all') {
-      const monthBalances = new Map();
-      for (let m = 1; m <= 12; m += 1) {
-        monthBalances.set(String(m).padStart(2, '0'), 0);
-      }
-      for (const e of entries) {
-        const mm = String(e.scheduled_date || '').slice(5, 7);
-        if (!monthBalances.has(mm)) continue;
-        const amount = Number(e.amount || 0);
-        monthBalances.set(mm, Number(monthBalances.get(mm) || 0) + (e.type === 'income' ? amount : -amount));
-      }
-      const negativeMonths = Array.from(monthBalances.entries())
-        .filter(([, balance]) => balance < 0)
-        .map(([mm]) => String(Number(mm)) + '月');
-      if (negativeMonths.length > 0) {
-        balanceAlertEl.textContent = '警告: 差引がマイナスの月があります（' + negativeMonths.join(' / ') + '）。資金繰りを確認してください。';
-        balanceAlertEl.classList.add('show');
-      } else {
-        balanceAlertEl.textContent = '警告: 今月の差引がマイナスです。資金繰りを確認してください。';
-        balanceAlertEl.classList.remove('show');
-      }
-      return;
-    }
-
-    const monthEntries = entries.filter((e) => String(e.scheduled_date || '').slice(5, 7) === monthFilter);
+    const month = selectedMonth();
+    const monthEntries = entries.filter((e) => String(e.scheduled_date || '').slice(0, 7) === month);
     const balance = monthEntries.reduce((sum, e) => {
       const amount = Number(e.amount || 0);
       return sum + (e.type === 'income' ? amount : -amount);
     }, 0);
-    const monthLabel = String(Number(monthFilter));
-    balanceAlertEl.textContent = '警告: ' + monthLabel + '月の差引がマイナスです。資金繰りを確認してください。';
-    balanceAlertEl.classList.toggle('show', balance < 0);
+    const monthLabel = month.slice(5, 7);
+    if (balance < 0) {
+      balanceAlertEl.textContent = '警告: ' + String(Number(monthLabel)) + '月の差引がマイナスです。資金繰りを確認してください。';
+      balanceAlertEl.classList.add('show');
+    } else {
+      balanceAlertEl.textContent = '';
+      balanceAlertEl.classList.remove('show');
+    }
   }
 
   async function loadAll() {
@@ -2707,14 +2835,10 @@ function renderAppPage(email: string, isAdmin: boolean) {
       ]);
       const annualRes = await fetch('/api/annual-expense-entries?year=' + encodeURIComponent(year));
 
-      if (!summaryRes.ok || !entriesRes.ok || !annualRes.ok || !openingRes.ok) {
-        throw new Error('読み込み失敗');
-      }
-
-      const summary = await summaryRes.json();
-      const entriesPayload = await entriesRes.json();
-      const openingPayload = await openingRes.json();
-      const annualPayload = await annualRes.json();
+      const summary = summaryRes.ok ? await summaryRes.json() : { income: 0, expense: 0, balance: 0 };
+      const entriesPayload = entriesRes.ok ? await entriesRes.json() : { entries: [] };
+      const openingPayload = openingRes.ok ? await openingRes.json() : { openingBalance: 0 };
+      const annualPayload = annualRes.ok ? await annualRes.json() : { entries: [] };
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
       syncMonthFilterOptions();
@@ -2723,8 +2847,18 @@ function renderAppPage(email: string, isAdmin: boolean) {
       renderRows();
       updateSelectedMonthAlert();
       renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
+      if (!entriesRes.ok) {
+        showBanner(statusBanner, 'error', '一覧データの取得に失敗しました。再読み込みしてください。');
+      } else {
+        hideBanner(statusBanner);
+      }
     } catch (err) {
-      showBanner(statusBanner, 'error', '一覧の取得に失敗しました。通信状態を確認して再読み込みしてください。');
+      console.error('loadAll failed', err);
+      if (entries.length === 0) {
+        showBanner(statusBanner, 'error', '一覧の取得に失敗しました。通信状態を確認して再読み込みしてください。');
+      } else {
+        hideBanner(statusBanner);
+      }
     }
   }
 
@@ -2938,7 +3072,6 @@ function renderAppPage(email: string, isAdmin: boolean) {
         '<td>' + (idx + 1) + '</td>' +
         '<td>' +
           '<span class="label-dot label-' + escapeHtml(String(e.label_color || 'blue')) + '"></span>' +
-          (Number(e.is_sample) === 1 ? '<span class="muted">サンプル</span>' : '') +
         '</td>' +
         '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
         '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
@@ -2963,7 +3096,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
             '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
             '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
             '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
-            buildCfCategoryOptionsHtml(String(e.cf_category || '')) +
+            buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
             '</select>' +
             '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
             '<option value="red"' + (e.label_color === 'red' ? ' selected' : '') + '>色:赤</option>' +
@@ -3334,6 +3467,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       showBanner(statusBanner, 'ok', '予定を追加しました。');
       form.reset();
       syncFormDateWithMonth();
+      syncEntryCfCategoryOptions();
       await loadAll();
     } catch (_) {
       showBanner(statusBanner, 'error', '登録処理中に通信エラーが発生しました。');
@@ -3346,6 +3480,10 @@ function renderAppPage(email: string, isAdmin: boolean) {
     setMonthCaption();
     syncFormDateWithMonth();
     await loadAll();
+  });
+
+  entryTypeEl?.addEventListener('change', () => {
+    syncEntryCfCategoryOptions();
   });
 
 
@@ -3947,9 +4085,15 @@ bindChartTooltip('trend');
 </html>`;
 }
 
-function renderCashflowStatementPage(email: string, isAdmin: boolean) {
+function renderCashflowStatementPage(
+  email: string,
+  isAdmin: boolean,
+  cashflowStatementData: CashflowStatementData
+) {
   const displayColumns = buildCashflowStatementDisplayColumns(2026, 2031, new Date());
   const printableMonthColumns = displayColumns.map((column, index) => ({ column, index }));
+  const uncategorizedCount = cashflowStatementData.uncategorizedCount;
+  const zeroDefaultRowNos = new Set([6, 7, 16, 29, 31, 42, 55, 56]);
   const sourceMonthColumnIndexes = CASHFLOW_STATEMENT_COLUMNS
     .map((column, index) => ({ column, index }))
     .filter(({ column }) => isCashflowStatementMonthLabel(column.yearLabel));
@@ -3965,8 +4109,11 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
     `列数 ${displayColumns.length}`,
     `行数 ${CASHFLOW_STATEMENT_ROWS.length}`,
     '表示期間: 2026年1月〜2031年12月',
-    '元データ: 資金繰り表実績値のみ202600616.xlsx'
+    '動的計算: CF区分ありの明細のみを集計'
   ].join(' / ');
+  const uncategorizedNotice = uncategorizedCount > 0
+    ? `<div class="range-alert show" style="margin-top:10px; pointer-events:none;">未分類の明細が ${uncategorizedCount} 件あります。CF区分が付くまで、資金繰り表の数値は表示しません。</div>`
+    : '';
   const rowHtml = CASHFLOW_STATEMENT_ROWS.map((row, index) => {
     const gapClass = index > 0 && CASHFLOW_STATEMENT_ROWS[index - 1].rowNo + 1 < row.rowNo ? ' row-gap' : '';
     const rowClass = `row-${row.kind}${gapClass}`;
@@ -3976,13 +4123,16 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
     sourceMonthColumnIndexes.forEach(({ column, index: columnIndex }) => {
       sourceMonthValues.set(toCashflowStatementMonthKey(column.yearLabel), row.values[columnIndex] ?? null);
     });
+    const dynamicMonthValues = cashflowStatementData.valuesByRowNo.get(row.rowNo) ?? null;
     const cells = displayColumns.map((column) => {
-      const value = sourceMonthValues.get(toCashflowStatementMonthKey(column.yearLabel)) ?? null;
+      const monthKey = toCashflowStatementMonthKey(column.yearLabel);
+      const fallbackValue = zeroDefaultRowNos.has(row.rowNo) ? 0 : null;
+      const value = dynamicMonthValues?.get(monthKey) ?? sourceMonthValues.get(monthKey) ?? fallbackValue;
       const isNumber = typeof value === 'number';
       const cellClass = isNumber ? `num${value < 0 ? ' neg' : ''}` : 'empty';
       return `<td class="${cellClass}" data-col-key="${escapeHtml(column.key)}">${formatCashflowStatementValue(value)}</td>`;
     }).join('');
-    return `<tr class="${rowClass}">
+    return `<tr class="${rowClass}" data-row-no="${row.rowNo}">
       <th scope="row" class="sticky-col sticky-label">${label}</th>
       <td class="sticky-col sticky-sub">${subLabel}</td>
       ${cells}
@@ -4011,7 +4161,7 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
     .sub { color:var(--muted); font-size:13px; }
     .actions { display:flex; gap:8px; flex-wrap:wrap; }
     .actions a { display:inline-flex; align-items:center; padding:9px 10px; border:1px solid #b9c8d9; border-radius:8px; background:#fff; color:var(--text); text-decoration:none; font-size:14px; }
-    .range-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-top:14px; }
+    .range-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-top:14px; position:sticky; top:12px; z-index:5; padding:8px 0 6px; background:linear-gradient(180deg, rgba(251,253,255,.98) 0%, rgba(251,253,255,.92) 100%); backdrop-filter:saturate(180%) blur(6px); }
     .range-toolbar label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
     .range-toolbar select, .range-toolbar button { border:1px solid #b9c8d9; border-radius:8px; background:#fff; color:var(--text); font-size:14px; padding:9px 10px; }
     .range-toolbar button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:700; }
@@ -4022,6 +4172,7 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
     .panel-body { padding:16px; }
     .lead { display:grid; grid-template-columns: 1.5fr 1fr; gap:12px; align-items:start; }
     .lead-card { border:1px solid var(--line); border-radius:12px; padding:14px; background:#fbfdff; }
+    .lead > .lead-card:first-child { position:sticky; top:12px; align-self:start; z-index:4; }
     .lead-card strong { display:block; margin-bottom:6px; }
     .meta { font-size:12px; color:var(--muted); }
     .table-scroll-x { overflow-x:auto; overflow-y:hidden; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:#f8fafc; height:18px; }
@@ -4099,7 +4250,7 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
       <div class="lead">
         <div class="lead-card">
           <strong>このページの役割</strong>
-          <div class="sub">2026年から2031年までの月列を先に用意し、月が終了したら自動で「計画」から「実績」へ切り替わる前提の表示にしています。次の段階では、CF行に仕分け区分を持たせて各年月セルへ自動加算・減算できるように拡張します。</div>
+          <div class="sub">2026年から2031年までの月列を先に用意し、月が終了したら自動で「計画」から「実績」へ切り替わる前提の表示にしています。現在は、前月繰越 / 経常収入 / 経常支出 / 経常収支 / 財務等収入 / 財務等支出 / 財務等収支 / 次月繰越金を明細のCF区分から自動集計しています。</div>
           <div class="range-toolbar">
             <label>
               開始月
@@ -4114,11 +4265,12 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
             <button id="export-excel" type="button">Excel出力</button>
           </div>
           <div class="range-note">A3・1枚想定のため、PDF保存できる月範囲は最大12か月までに制限しています。</div>
+          ${uncategorizedNotice}
           <div id="range-alert" class="range-alert" role="alert"></div>
         </div>
         <div class="lead-card">
-          <strong>読み込み元</strong>
-          <div class="meta">${escapeHtml(summaryText)}</div>
+        <strong>表示内容</strong>
+        <div class="meta">${escapeHtml(summaryText)}</div>
           <div class="legend">
             <span class="chip actual">実績</span>
             <span class="chip plan">計画</span>
@@ -4226,8 +4378,8 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
       return;
     }
     if (!applySelectedRange()) return;
-    hideRangeAlert();
-    window.print();
+    showRangeAlert('印刷ダイアログを開いています。');
+    window.setTimeout(() => window.print(), 0);
   }
 
   function buildExportFileName(extension) {
@@ -4244,52 +4396,265 @@ function renderCashflowStatementPage(email: string, isAdmin: boolean) {
       .replaceAll('"', '&quot;');
   }
 
-  function handleExportExcel() {
-    if (!applySelectedRange()) return;
-    hideRangeAlert();
+  function escapeExcelXml(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&apos;');
+  }
 
-    const visibleRows = Array.from(statementTableEl?.querySelectorAll('tr') || []);
-    const htmlRows = visibleRows.map((row) => {
-      const visibleCells = Array.from(row.children).filter((cell) => {
-        if (!(cell instanceof HTMLElement)) return false;
-        return !cell.classList.contains('col-hidden');
-      });
-      const cellsHtml = visibleCells.map((cell) => {
-        const tag = cell.tagName.toLowerCase() === 'th' ? 'th' : 'td';
-        const text = escapeExcelHtml(cell.textContent || '');
-        return '<' + tag + '>' + text + '</' + tag + '>';
+  const XLSX_MAIN_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const XLSX_REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const PKG_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+
+  function toExcelColumnLabel(index) {
+    let n = index;
+    let label = '';
+    while (n > 0) {
+      const remainder = (n - 1) % 26;
+      label = String.fromCharCode(65 + remainder) + label;
+      n = Math.floor((n - 1) / 26);
+    }
+    return label;
+  }
+
+  function encodeUtf8(text) {
+    return new TextEncoder().encode(String(text));
+  }
+
+  const CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i += 1) {
+      let c = i;
+      for (let j = 0; j < 8; j += 1) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(bytes) {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i += 1) {
+      c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  function u16(value) {
+    const out = new Uint8Array(2);
+    new DataView(out.buffer).setUint16(0, value, true);
+    return out;
+  }
+
+  function u32(value) {
+    const out = new Uint8Array(4);
+    new DataView(out.buffer).setUint32(0, value >>> 0, true);
+    return out;
+  }
+
+  function concatBytes(parts) {
+    const total = parts.reduce((sum, part) => sum + part.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part, offset);
+      offset += part.length;
+    }
+    return out;
+  }
+
+  function buildZip(entries) {
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    for (const entry of entries) {
+      const nameBytes = encodeUtf8(entry.name);
+      const dataBytes = entry.data instanceof Uint8Array ? entry.data : encodeUtf8(entry.data);
+      const crc = crc32(dataBytes);
+      const localHeader = concatBytes([u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0), u32(crc), u32(dataBytes.length), u32(dataBytes.length), u16(nameBytes.length), u16(0)]);
+      localParts.push(localHeader, nameBytes, dataBytes);
+      const centralHeader = concatBytes([u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0), u32(crc), u32(dataBytes.length), u32(dataBytes.length), u16(nameBytes.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset)]);
+      centralParts.push(centralHeader, nameBytes);
+      offset += localHeader.length + nameBytes.length + dataBytes.length;
+    }
+    const centralDirectory = concatBytes(centralParts);
+    const localData = concatBytes(localParts);
+    const eocd = concatBytes([u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length), u32(centralDirectory.length), u32(localData.length), u16(0)]);
+    return concatBytes([localData, centralDirectory, eocd]);
+  }
+
+  function xmlInlineString(value) {
+    return '<c t="inlineStr"><is><t xml:space="preserve">' + escapeExcelXml(value) + '</t></is></c>';
+  }
+
+  function xmlNumberCell(value, style = 1) {
+    return '<c s="' + style + '" t="n"><v>' + String(Number(value || 0)) + '</v></c>';
+  }
+
+  function xmlFormulaCell(formula, value) {
+    return '<c s="1"><f>' + escapeExcelXml(formula) + '</f><v>' + String(Number(value || 0)) + '</v></c>';
+  }
+
+  function buildWorkbookXml() {
+    const exportRows = Array.from(statementTableEl?.querySelectorAll('thead tr, tbody tr') || []);
+    const rowNoToWorkbookRow = new Map();
+    exportRows.forEach((row, index) => {
+      const rowNo = Number((row instanceof HTMLElement ? row.dataset.rowNo : '') || '0');
+      if (Number.isInteger(rowNo) && rowNo > 0) {
+        rowNoToWorkbookRow.set(rowNo, index + 1);
+      }
+    });
+
+    const sheetRows = exportRows.map((row, rowIndex) => {
+      const sheetRowNo = rowIndex + 1;
+      const rowNo = Number((row instanceof HTMLElement ? row.dataset.rowNo : '') || '0');
+      const cells = Array.from(row.children).filter((cell) => cell instanceof HTMLElement && !cell.classList.contains('col-hidden'));
+      const rowCells = cells.map((cell, cellIndex) => {
+        const isHeaderCell = cell.tagName.toLowerCase() === 'th';
+        const text = cell.textContent || '';
+        const monthCellIndex = cellIndex - 2;
+        const monthColumnNumber = cellIndex + 1;
+        if (rowNo > 0 && monthCellIndex >= 0) {
+          const cellText = text.trim();
+          const numericValue = cellText === '' || cellText === '–' ? 0 : Number(cellText.replaceAll(',', ''));
+          const row6 = rowNoToWorkbookRow.get(6);
+          const row7 = rowNoToWorkbookRow.get(7);
+          const row8 = rowNoToWorkbookRow.get(8);
+          const row15 = rowNoToWorkbookRow.get(15);
+          const row16 = rowNoToWorkbookRow.get(16);
+          const row17 = rowNoToWorkbookRow.get(17);
+          const row28 = rowNoToWorkbookRow.get(28);
+          const row29 = rowNoToWorkbookRow.get(29);
+          const row31 = rowNoToWorkbookRow.get(31);
+          const row32 = rowNoToWorkbookRow.get(32);
+          const row41 = rowNoToWorkbookRow.get(41);
+          const row42 = rowNoToWorkbookRow.get(42);
+          const row43 = rowNoToWorkbookRow.get(43);
+          const row54 = rowNoToWorkbookRow.get(54);
+          const row55 = rowNoToWorkbookRow.get(55);
+          const row56 = rowNoToWorkbookRow.get(56);
+          if (rowNo === 6) {
+            if (monthCellIndex === 0 || !row56) return xmlNumberCell(0);
+            return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber - 1) + row56, numericValue);
+          }
+          if (rowNo === 7 && row8 && row15) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row8 + ':' + toExcelColumnLabel(monthColumnNumber) + row15 + ')', numericValue);
+          if (rowNo === 16 && row17 && row28) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row17 + ':' + toExcelColumnLabel(monthColumnNumber) + row28 + ')', numericValue);
+          if (rowNo === 29 && row7 && row16) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row7 + '-' + toExcelColumnLabel(monthColumnNumber) + row16, numericValue);
+          if (rowNo === 31 && row32 && row41) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row32 + ':' + toExcelColumnLabel(monthColumnNumber) + row41 + ')', numericValue);
+          if (rowNo === 42 && row43 && row54) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row43 + ':' + toExcelColumnLabel(monthColumnNumber) + row54 + ')', numericValue);
+          if (rowNo === 55 && row31 && row42) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row31 + '-' + toExcelColumnLabel(monthColumnNumber) + row42, numericValue);
+          if (rowNo === 56 && row6 && row29 && row55) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row6 + '+' + toExcelColumnLabel(monthColumnNumber) + row29 + '+' + toExcelColumnLabel(monthColumnNumber) + row55, numericValue);
+          if (cellText === '' || cellText === '–') return '<c/>';
+          return xmlNumberCell(Number.isFinite(numericValue) ? numericValue : 0);
+        }
+        if (isHeaderCell) return xmlInlineString(text.trim());
+        const value = text.trim();
+        if (value === '') return '<c/>';
+        const parsed = Number(value.replaceAll(',', ''));
+        if (!Number.isNaN(parsed) && /^[\d,.-]+$/.test(value)) return xmlNumberCell(parsed);
+        return xmlInlineString(value);
       }).join('');
-      return '<tr>' + cellsHtml + '</tr>';
+      return '<row r="' + sheetRowNo + '">' + rowCells + '</row>';
     }).join('');
 
-    const workbookHtml = '<!doctype html>' +
-      '<html xmlns:o="urn:schemas-microsoft-com:office:office" ' +
-      'xmlns:x="urn:schemas-microsoft-com:office:excel" ' +
-      'xmlns="http://www.w3.org/TR/REC-html40">' +
-      '<head>' +
-      '<meta charset="UTF-8">' +
-      '<meta name="ProgId" content="Excel.Sheet">' +
-      '<meta name="Generator" content="Cashflow Manager">' +
-      '<style>' +
-      'table { border-collapse: collapse; font-family: "Yu Gothic", "Meiryo", sans-serif; font-size: 11pt; }' +
-      'th, td { border: 1px solid #cbd5e1; padding: 6px 8px; white-space: nowrap; }' +
-      'th { background: #f5f8fb; font-weight: 700; }' +
-      '</style>' +
-      '</head>' +
-      '<body>' +
-      '<table>' + htmlRows + '</table>' +
-      '</body>' +
-      '</html>';
+    const usedColumnCount = Math.max(
+      1,
+      ...exportRows.map((row) => Array.from(row.children).filter((cell) => cell instanceof HTMLElement && !cell.classList.contains('col-hidden')).length)
+    );
+    const usedRange = 'A1:' + toExcelColumnLabel(usedColumnCount) + sheetRows.length;
+    const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
+      '<dimension ref="' + usedRange + '"/>' +
+      '<sheetViews><sheetView workbookViewId="0"/></sheetViews>' +
+      '<sheetData>' + sheetRows + '</sheetData>' +
+      '<autoFilter ref="' + usedRange + '"/>' +
+      '</worksheet>';
+    const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
+      '<fileVersion appName="xl"/>' +
+      '<workbookPr calcMode="auto"/>' +
+      '<bookViews><workbookView activeTab="0"/></bookViews>' +
+      '<sheets><sheet name="資金繰り表" sheetId="1" r:id="rId1"/></sheets>' +
+      '<calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>' +
+      '</workbook>';
+    const workbookRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="' + PKG_REL_NS + '">' +
+      '<Relationship Id="rId1" Type="' + XLSX_REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/>' +
+      '</Relationships>';
+    const rootRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="' + PKG_REL_NS + '">' +
+      '<Relationship Id="rId1" Type="' + XLSX_REL_NS + '/officeDocument" Target="xl/workbook.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+      '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>' +
+      '</Relationships>';
+    const contentTypesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+      '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
+      '</Types>';
+    const nowIso = new Date().toISOString();
+    const coreXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+      '<dc:title>資金繰り表</dc:title>' +
+      '<dc:creator>Cashflow Manager</dc:creator>' +
+      '<cp:lastModifiedBy>Cashflow Manager</cp:lastModifiedBy>' +
+      '<dcterms:created xsi:type="dcterms:W3CDTF">' + nowIso + '</dcterms:created>' +
+      '<dcterms:modified xsi:type="dcterms:W3CDTF">' + nowIso + '</dcterms:modified>' +
+      '</cp:coreProperties>';
+    const appXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+      '<Application>Cashflow Manager</Application>' +
+      '</Properties>';
+    const stylesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="' + XLSX_MAIN_NS + '">' +
+      '<fonts count="2"><font><sz val="11"/><name val="Yu Gothic"/></font><font><b/><sz val="11"/><name val="Yu Gothic"/></font></fonts>' +
+      '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="3">' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left"/></xf>' +
+      '<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
+      '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center"/></xf>' +
+      '</cellXfs>' +
+      '</styleSheet>';
+    return buildZip([
+      { name: '[Content_Types].xml', data: contentTypesXml },
+      { name: '_rels/.rels', data: rootRelsXml },
+      { name: 'docProps/app.xml', data: appXml },
+      { name: 'docProps/core.xml', data: coreXml },
+      { name: 'xl/workbook.xml', data: workbookXml },
+      { name: 'xl/_rels/workbook.xml.rels', data: workbookRelsXml },
+      { name: 'xl/styles.xml', data: stylesXml },
+      { name: 'xl/worksheets/sheet1.xml', data: sheetXml }
+    ]);
+  }
 
-    const blob = new Blob(['\ufeff', workbookHtml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = buildExportFileName('xls');
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+  function handleExportExcel() {
+    if (!applySelectedRange()) return;
+    showRangeAlert('Excelファイルをダウンロードしています。');
+    try {
+      const workbookZip = buildWorkbookXml();
+      const blob = new Blob([workbookZip], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = buildExportFileName('xlsx');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error('Excel export failed', error);
+      showRangeAlert('Excel出力に失敗しました。画面を再読み込みして再試行してください。');
+    }
   }
 
   function syncStatementScrollMetrics() {
@@ -4584,6 +4949,199 @@ function buildCashflowStatementDisplayColumns(startYear: number, endYear: number
   return columns;
 }
 
+type CashflowStatementRowValueMap = Map<string, number | string | null>;
+type CashflowStatementData = {
+  valuesByRowNo: Map<number, CashflowStatementRowValueMap>;
+  uncategorizedCount: number;
+};
+
+async function loadCashflowStatementData(
+  db: D1Database,
+  organizationId: number,
+  startYear: number,
+  endYear: number
+): Promise<CashflowStatementData> {
+  const result = await db.prepare(
+    `SELECT scheduled_date, amount, type, cf_category
+     FROM cashflow_entries
+     WHERE organization_id = ?
+       AND deleted_at IS NULL
+       AND scheduled_date < ?
+     ORDER BY scheduled_date ASC, order_index ASC, id ASC`
+  )
+    .bind(organizationId, `${endYear + 1}-01-01`)
+    .all<{
+      scheduled_date: string;
+      amount: number;
+      type: 'income' | 'expense';
+      cf_category: string | null;
+    }>();
+
+  const entries = (result.results ?? [])
+    .filter((entry) => parseDateOnly(entry.scheduled_date) !== null)
+    .map((entry) => ({
+      monthKey: entry.scheduled_date.slice(0, 7),
+      amount: Number(entry.amount || 0),
+      type: entry.type,
+      cfCategory: String(entry.cf_category || '').trim()
+    }))
+    .sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+  const categorizedEntries = entries.filter((entry) => entry.cfCategory !== '');
+  const uncategorizedCount = entries.length - categorizedEntries.length;
+
+  if (categorizedEntries.length === 0) {
+    return {
+      valuesByRowNo: new Map(),
+      uncategorizedCount
+    };
+  }
+
+  const valuesByRowNo = new Map<number, CashflowStatementRowValueMap>();
+  const itemRowMonths = new Map<number, Map<string, number>>();
+  const openingByMonth = new Map<string, number>();
+  const operatingIncomeByMonth = new Map<string, number>();
+  const operatingExpenseByMonth = new Map<string, number>();
+  const operatingNetByMonth = new Map<string, number>();
+  const financingIncomeByMonth = new Map<string, number>();
+  const financingExpenseByMonth = new Map<string, number>();
+  const financingNetByMonth = new Map<string, number>();
+  const closingByMonth = new Map<string, number>();
+
+  const months: string[] = [];
+  for (let year = startYear; year <= endYear; year += 1) {
+    for (let month = 1; month <= 12; month += 1) {
+      months.push(`${year}-${String(month).padStart(2, '0')}`);
+    }
+  }
+
+  const addItemRowValue = (rowNo: number, monthKey: string, amount: number) => {
+    if (!itemRowMonths.has(rowNo)) itemRowMonths.set(rowNo, new Map());
+    const monthMap = itemRowMonths.get(rowNo)!;
+    monthMap.set(monthKey, (monthMap.get(monthKey) || 0) + amount);
+  };
+
+  const operatingIncomeRowMap = new Map<string, number>([
+    ['現金売上', 8],
+    ['売掛金回収', 9],
+    ['未収入金・前受金入金', 11],
+    ['その他の収入', 12],
+    ['売電収入（西予発電所）', 13],
+    ['売電収入（府中発電所）', 14],
+    ['売電収入（茨城発電所）', 15]
+  ]);
+  const operatingExpenseRowMap = new Map<string, number>([
+    ['現金仕入', 17],
+    ['買掛金支払', 18],
+    ['未払金・前渡金支払', 20],
+    ['人件費支出', 21],
+    ['家賃等', 22],
+    ['固定費', 23],
+    ['租税公課', 24],
+    ['その他の支出（社長）', 25],
+    ['その他の支出（UFJ）', 26],
+    ['その他の支出（木下）', 27],
+    ['その他の支出（その他）', 28]
+  ]);
+  const financingIncomeRowMap = new Map<string, number>([
+    ['固定性預金払戻し', 32],
+    ['銀行借入', 33],
+    ['E借入', 36],
+    ['売電事業分資金移動', 39],
+    ['設備収入（設備売却など）', 40],
+    ['その他の財務等収入', 41]
+  ]);
+  const financingExpenseRowMap = new Map<string, number>([
+    ['銀行借入返済', 43],
+    ['E借入', 46],
+    ['設備支出（固定資産投資）', 49],
+    ['その他の財務等支出', 50],
+    ['利息保証料支払', 51],
+    ['リース債務返済', 52]
+  ]);
+
+  let runningBalance = 0;
+  let cursor = 0;
+  for (const monthKey of months) {
+    while (cursor < categorizedEntries.length && categorizedEntries[cursor].monthKey < monthKey) {
+      const entry = categorizedEntries[cursor];
+      runningBalance += entry.type === 'income' ? entry.amount : -entry.amount;
+      cursor += 1;
+    }
+    openingByMonth.set(monthKey, runningBalance);
+
+    let operatingIncome = 0;
+    let operatingExpense = 0;
+    let hasOperatingIncomeEntry = false;
+    let hasOperatingExpenseEntry = false;
+    let financingIncome = 0;
+    let financingExpense = 0;
+    let hasFinancingIncomeEntry = false;
+    let hasFinancingExpenseEntry = false;
+    while (cursor < categorizedEntries.length && categorizedEntries[cursor].monthKey === monthKey) {
+      const entry = categorizedEntries[cursor];
+      if (CASHFLOW_STATEMENT_OPERATING_INCOME_CATEGORIES.has(entry.cfCategory)) {
+        operatingIncome += entry.amount;
+        hasOperatingIncomeEntry = true;
+        const rowNo = operatingIncomeRowMap.get(entry.cfCategory);
+        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+      } else if (CASHFLOW_STATEMENT_OPERATING_EXPENSE_CATEGORIES.has(entry.cfCategory)) {
+        operatingExpense += entry.amount;
+        hasOperatingExpenseEntry = true;
+        const rowNo = operatingExpenseRowMap.get(entry.cfCategory);
+        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+      }
+      if (CASHFLOW_STATEMENT_FINANCING_INCOME_CATEGORIES.has(entry.cfCategory)) {
+        financingIncome += entry.amount;
+        hasFinancingIncomeEntry = true;
+        const rowNo = financingIncomeRowMap.get(entry.cfCategory);
+        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+      } else if (CASHFLOW_STATEMENT_FINANCING_EXPENSE_CATEGORIES.has(entry.cfCategory)) {
+        financingExpense += entry.amount;
+        hasFinancingExpenseEntry = true;
+        const rowNo = financingExpenseRowMap.get(entry.cfCategory);
+        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+      }
+      runningBalance += entry.type === 'income' ? entry.amount : -entry.amount;
+      cursor += 1;
+    }
+
+    if (hasOperatingIncomeEntry) {
+      operatingIncomeByMonth.set(monthKey, operatingIncome);
+    }
+    if (hasOperatingExpenseEntry) {
+      operatingExpenseByMonth.set(monthKey, operatingExpense);
+    }
+    if (hasOperatingIncomeEntry || hasOperatingExpenseEntry) {
+      operatingNetByMonth.set(monthKey, operatingIncome - operatingExpense);
+    }
+    if (hasFinancingIncomeEntry) {
+      financingIncomeByMonth.set(monthKey, financingIncome);
+    }
+    if (hasFinancingExpenseEntry) {
+      financingExpenseByMonth.set(monthKey, financingExpense);
+    }
+    if (hasFinancingIncomeEntry || hasFinancingExpenseEntry) {
+      financingNetByMonth.set(monthKey, financingIncome - financingExpense);
+    }
+    closingByMonth.set(monthKey, runningBalance);
+  }
+
+  for (const [rowNo, monthMap] of itemRowMonths.entries()) {
+    valuesByRowNo.set(rowNo, new Map(Array.from(monthMap.entries()).map(([monthKey, value]) => [monthKey, value])));
+  }
+
+  valuesByRowNo.set(6, new Map(Array.from(openingByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(7, new Map(Array.from(operatingIncomeByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(16, new Map(Array.from(operatingExpenseByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(29, new Map(Array.from(operatingNetByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(31, new Map(Array.from(financingIncomeByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(42, new Map(Array.from(financingExpenseByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(55, new Map(Array.from(financingNetByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(56, new Map(Array.from(closingByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+
+  return { valuesByRowNo, uncategorizedCount };
+}
+
 function isCashflowStatementMonthLabel(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}/.test(value);
 }
@@ -4836,7 +5394,7 @@ function isValidEntryInput(input: {
   staffName: string;
   labelColor: string;
   cfCategory: string;
-}): input is {
+}, allowedCfCategories?: Set<string>): input is {
   title: string;
   note: string;
   amount: number;
@@ -4850,7 +5408,7 @@ function isValidEntryInput(input: {
 } {
   const allowedAccounts = new Set(['', '三井住友口座', '和気口座', '那須口座']);
   const allowedColors = new Set<string>(ENTRY_LABEL_COLORS);
-  const allowedCfCategories = new Set<string>(CF_CATEGORIES);
+  const categories = allowedCfCategories ?? new Set<string>(CF_CATEGORIES);
   return (
     input.title.length > 0 &&
     input.title.length <= MAX_TITLE_LENGTH &&
@@ -4860,7 +5418,7 @@ function isValidEntryInput(input: {
     input.customerName.length <= 80 &&
     input.staffName.length <= 80 &&
     allowedColors.has(input.labelColor) &&
-    allowedCfCategories.has(input.cfCategory) &&
+    categories.has(input.cfCategory) &&
     Number.isInteger(input.amount) &&
     Number(input.amount) >= MIN_AMOUNT &&
     Number(input.amount) <= MAX_AMOUNT &&
@@ -4869,15 +5427,17 @@ function isValidEntryInput(input: {
   );
 }
 
-function renderCfCategoryOptions(selected: string): string {
-  return CF_CATEGORIES.map((category) => {
+function renderCfCategoryOptions(selected: string, entryType: string): string {
+  const categories = getCfCategoriesByEntryType(entryType);
+  return ['', ...categories].map((category) => {
     const label = category === '' ? '未設定' : category;
     return `<option value="${escapeHtml(category)}"${category === selected ? ' selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
 }
 
-function buildCfCategoryOptionsHtml(selected: string): string {
-  return CF_CATEGORIES.map((category) => {
+function buildCfCategoryOptionsHtml(selected: string, entryType: string): string {
+  const categories = getCfCategoriesByEntryType(entryType);
+  return ['', ...categories].map((category) => {
     const label = category === '' ? 'CF:未設定' : `CF:${category}`;
     return '<option value="' + escapeHtml(category) + '"' + (category === selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
   }).join('');

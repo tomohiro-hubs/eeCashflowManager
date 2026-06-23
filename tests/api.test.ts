@@ -20,13 +20,13 @@ async function createOrganization(name = `org-${crypto.randomUUID()}`): Promise<
 
 async function createAuthedCookie(
   email = 'owner@example.com',
-  opts?: { organizationId?: number; role?: 'owner' | 'admin' | 'editor' | 'viewer' | 'member' }
+  opts?: { organizationId?: number; role?: 'owner' | 'admin' | 'editor' | 'viewer' | 'member'; isAdmin?: boolean }
 ): Promise<string> {
   const organizationId = opts?.organizationId ?? (await createOrganization());
   const inserted = await env.DB.prepare(
-    'INSERT INTO users (organization_id, email, password_hash, password_salt) VALUES (?, ?, ?, ?) RETURNING id'
+    'INSERT INTO users (organization_id, email, password_hash, password_salt, is_admin) VALUES (?, ?, ?, ?, ?) RETURNING id'
   )
-    .bind(organizationId, email, 'hash', 'salt')
+    .bind(organizationId, email, 'hash', 'salt', opts?.isAdmin ? 1 : 0)
     .first<{ id: number }>();
 
   const userId = inserted?.id;
@@ -255,6 +255,49 @@ describe('entries api', () => {
     }
   });
 
+  it('lists completed annual entries for both income and expense', async () => {
+    const cookie = await createAuthedCookie();
+    await createEntry(cookie, {
+      title: 'Annual Income',
+      amount: 1000,
+      type: 'income',
+      scheduledDate: '2026-04-10'
+    });
+    await createEntry(cookie, {
+      title: 'Annual Expense',
+      amount: 700,
+      type: 'expense',
+      scheduledDate: '2026-04-11'
+    });
+
+    const listed = await fetchApp('/api/entries?year=2026', { headers: { cookie } });
+    const listedPayload = await listed.json<{ entries: Array<{ id: number; title: string }> }>();
+    const ids = listedPayload.entries
+      .filter((e) => e.title === 'Annual Income' || e.title === 'Annual Expense')
+      .map((e) => e.id);
+    expect(ids).toHaveLength(2);
+
+    const completeRes = await fetchApp('/api/entries/bulk', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ ids, action: 'set_completed', isCompleted: true })
+    });
+    expect(completeRes.status).toBe(200);
+
+    const annualRes = await fetchApp('/api/annual-expense-entries?year=2026', {
+      headers: { cookie }
+    });
+    expect(annualRes.status).toBe(200);
+
+    const annualPayload = await annualRes.json<{ entries: Array<{ title: string; type: 'income' | 'expense' }> }>();
+    expect(annualPayload.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: 'Annual Income', type: 'income' }),
+        expect.objectContaining({ title: 'Annual Expense', type: 'expense' })
+      ])
+    );
+  });
+
   it('returns 400 for invalid create payload', async () => {
     const cookie = await createAuthedCookie();
 
@@ -476,6 +519,33 @@ describe('session cookie security', () => {
     expect(setCookie).toContain('HttpOnly');
     expect(setCookie).toContain('Secure');
     expect(setCookie).toContain('SameSite=Strict');
+  });
+});
+
+describe('audit logs api', () => {
+  it('filters session logs by JST day boundaries', async () => {
+    const cookie = await createAuthedCookie('audit-admin@example.com', { isAdmin: true, role: 'owner' });
+    const userRow = await env.DB.prepare('SELECT id FROM users WHERE email = ?')
+      .bind('audit-admin@example.com')
+      .first<{ id: number }>();
+    expect(userRow?.id).toBeTruthy();
+
+    await env.DB.prepare(
+      `INSERT INTO user_session_logs (user_id, session_token, login_at)
+       VALUES (?, 'tokyo-in', '2026-06-18 15:30:00'),
+              (?, 'tokyo-out', '2026-06-19 15:30:00')`
+    )
+      .bind(userRow!.id, userRow!.id)
+      .run();
+
+    const res = await fetchApp('/api/audit/session-logs?from=2026-06-19&to=2026-06-19', {
+      headers: { cookie }
+    });
+
+    expect(res.status).toBe(200);
+    const payload = await res.json<{ logs: Array<{ session_token_masked: string }> }>();
+    expect(payload.logs).toHaveLength(1);
+    expect(payload.logs[0].session_token_masked).toContain('tokyo-in');
   });
 });
 
