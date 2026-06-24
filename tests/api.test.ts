@@ -749,6 +749,57 @@ describe('rakuraku csv import errors', () => {
     });
   });
 
+  it('imports cashflow csv rows with quoted newlines in cells', async () => {
+    const cookie = await createAuthedCookie('csv-multiline@example.com');
+    const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+    const csv = [
+      ['ID', '予定日', '区分', 'CF区分', '件名', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'].map(quote).join(','),
+      [
+        '',
+        '2026-04-10',
+        '入金',
+        '',
+        '複数行メモの案件',
+        '1000',
+        '1行目\n2行目',
+        '',
+        '顧客A',
+        '担当A',
+        '未完了',
+        'blue',
+        'M-200'
+      ].map(quote).join(',')
+    ].join('\n');
+
+    const formData = new FormData();
+    formData.append('file', new File([csv], 'cashflow.csv', { type: 'text/csv' }));
+    const res = await fetchApp('/api/import/cashflow', {
+      method: 'POST',
+      headers: { cookie },
+      body: formData
+    });
+
+    expect(res.status).toBe(200);
+    const payload = await res.json<{ ok: boolean; insertedEntries: number; failedRows: number }>();
+    expect(payload.ok).toBe(true);
+    expect(payload.insertedEntries).toBe(1);
+    expect(payload.failedRows).toBe(0);
+
+    const listRes = await fetchApp('/api/entries?year=2026', {
+      headers: { cookie }
+    });
+    expect(listRes.status).toBe(200);
+    const listPayload = await listRes.json<{ entries: Array<{ title: string; note: string | null }> }>();
+    expect(listPayload.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: '複数行メモの案件',
+          note: '1行目\n2行目'
+        })
+      ])
+    );
+  });
+
   it('updates existing entries by managementNo on re-import', async () => {
     const cookie = await createAuthedCookie('csv-upsert@example.com');
     const row1 = {

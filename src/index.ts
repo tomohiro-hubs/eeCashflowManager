@@ -1380,17 +1380,15 @@ app.post('/api/import/cashflow', async (c) => {
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const text = decodeShiftJisLike(bytes);
-    
-    // Parse CSV lines
-    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter((v) => v.trim() !== '');
-    if (lines.length === 0) {
+    const records = parseCsvRecords(text);
+    if (records.length === 0) {
       return c.json({ ok: false, error: 'CSVファイルが空です。' }, 400);
     }
-    if (lines.length === 1) {
+    if (records.length === 1) {
       return c.json({ ok: false, error: 'CSVデータ行がありません。' }, 400);
     }
 
-    const header = parseCsvLineSimple(lines[0].replace(/^\uFEFF/, ''));
+    const header = records[0].map((cell) => cell.replace(/^\uFEFF/, '').trim());
     const idx = {
       id: header.indexOf('ID'),
       scheduledDate: header.indexOf('予定日'),
@@ -1433,8 +1431,9 @@ app.post('/api/import/cashflow', async (c) => {
     let failedRows = 0;
     const rowErrors: Array<{ rowNumber: number; message: string }> = [];
 
-    for (let i = 1; i < lines.length; i += 1) {
-      const cols = parseCsvLineSimple(lines[i]);
+    for (let i = 1; i < records.length; i += 1) {
+      const cols = records[i] ?? [];
+      if (cols.every((cell) => String(cell ?? '').trim() === '')) continue;
       const rawId = idx.id >= 0 ? String(cols[idx.id] ?? '').trim() : '';
       const rawScheduledDate = String(cols[idx.scheduledDate] ?? '').trim();
       const rawType = String(cols[idx.type] ?? '').trim();
@@ -1582,7 +1581,7 @@ app.post('/api/import/cashflow', async (c) => {
             row.isCompleted,
             row.labelColor || '',
             row.cfCategorySpecified ? 1 : 0,
-            row.cfCategorySpecified ? (row.cfCategory || null) : null,
+            row.cfCategorySpecified ? (row.cfCategory || '') : '',
             row.managementNo || null,
             idNum,
             organizationId
@@ -1615,7 +1614,7 @@ app.post('/api/import/cashflow', async (c) => {
             row.customerName || null,
             row.staffName || null,
             row.labelColor || '',
-            row.cfCategory || null,
+            row.cfCategory || '',
             row.isCompleted,
             user.id
           )
@@ -6804,6 +6803,52 @@ function parseCsvLineSimple(line: string): string[] {
   return out;
 }
 
+function parseCsvRecords(text: string): string[][] {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const records: string[][] = [];
+  let record: string[] = [];
+  let cell = '';
+  let inQuote = false;
+
+  for (let i = 0; i < normalized.length; i += 1) {
+    const ch = normalized[i];
+    if (ch === '"') {
+      if (inQuote && normalized[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else {
+        inQuote = !inQuote;
+      }
+      continue;
+    }
+
+    if (!inQuote && ch === ',') {
+      record.push(cell);
+      cell = '';
+      continue;
+    }
+
+    if (!inQuote && ch === '\n') {
+      record.push(cell);
+      if (record.length > 1 || record[0] !== '') {
+        records.push(record);
+      }
+      record = [];
+      cell = '';
+      continue;
+    }
+
+    cell += ch;
+  }
+
+  record.push(cell);
+  if (record.length > 1 || record[0] !== '') {
+    records.push(record);
+  }
+
+  return records;
+}
+
 function parseRakurakuCsvText(text: string): Array<{
   managementNo?: string;
   projectName?: string;
@@ -6812,14 +6857,14 @@ function parseRakurakuCsvText(text: string): Array<{
   customerName?: string;
   scheduledDateRaw?: string;
 }> {
-  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter((v) => v.trim() !== '');
-  if (lines.length === 0) {
+  const records = parseCsvRecords(text);
+  if (records.length === 0) {
     throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.csvEmpty, 'CSVファイルが空です。');
   }
-  if (lines.length === 1) {
+  if (records.length === 1) {
     throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.csvEmpty, 'CSVデータ行がありません。');
   }
-  const header = parseCsvLineSimple(lines[0].replace(/^\uFEFF/, ''));
+  const header = records[0].map((cell) => cell.replace(/^\uFEFF/, '').trim());
   const idx = {
     managementNo: header.indexOf('入出金管理No'),
     projectName: header.indexOf('案件名'),
@@ -6843,8 +6888,9 @@ function parseRakurakuCsvText(text: string): Array<{
     customerName?: string;
     scheduledDateRaw?: string;
   }> = [];
-  for (let i = 1; i < lines.length; i += 1) {
-    const cols = parseCsvLineSimple(lines[i]);
+  for (let i = 1; i < records.length; i += 1) {
+    const cols = records[i] ?? [];
+    if (cols.every((cell) => String(cell ?? '').trim() === '')) continue;
     rows.push({
       managementNo: String(cols[idx.managementNo] ?? '').trim(),
       projectName: String(cols[idx.projectName] ?? '').trim(),
