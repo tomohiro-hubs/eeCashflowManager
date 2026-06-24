@@ -5531,11 +5531,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
   });
   let pendingImportData = null;
-  let pendingCashflowImportPreview: {
-    newEntries: Array<CashflowImportPreviewNewEntry>;
-    updateEntries: Array<CashflowImportPreviewUpdateEntry>;
-    rowErrors: Array<{ rowNumber: number; message: string }>;
-  } | null = null;
+  let pendingCashflowImportPreview = null;
 
   importRakurakuCsvBtn.addEventListener('click', async () => {
     const file = rakurakuCsvFileInput && rakurakuCsvFileInput.files ? rakurakuCsvFileInput.files[0] : null;
