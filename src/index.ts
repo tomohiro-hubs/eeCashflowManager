@@ -50,6 +50,54 @@ type AppErrorLogInsert = {
   stack?: string | null;
   detail?: unknown;
 };
+type CashflowImportParsedRow = {
+  rowNumber: number;
+  id: string;
+  scheduledDate: string;
+  type: 'income' | 'expense';
+  title: string;
+  amount: number;
+  note: string;
+  actualDate: string;
+  customerName: string;
+  staffName: string;
+  isCompleted: number;
+  labelColor: string;
+  managementNo: string;
+  cfCategory: string;
+  cfCategorySpecified: boolean;
+};
+type CashflowImportPreviewNewEntry = {
+  rowNumber: number;
+  title: string;
+  amount: number;
+  type: 'income' | 'expense';
+  scheduledDate: string;
+  note: string;
+  actualDate: string;
+  customerName: string;
+  staffName: string;
+  labelColor: string;
+  cfCategory: string;
+  isCompleted: number;
+  managementNo: string;
+};
+type CashflowImportPreviewUpdateEntry = CashflowImportPreviewNewEntry & {
+  id: number;
+  titleOld: string;
+  amountOld: number;
+  typeOld: 'income' | 'expense';
+  scheduledDateOld: string;
+  noteOld: string;
+  actualDateOld: string | null;
+  customerNameOld: string | null;
+  staffNameOld: string | null;
+  labelColorOld: string;
+  cfCategoryOld: string;
+  isCompletedOld: number;
+  managementNoOld: string | null;
+  hasDiff: boolean;
+};
 
 const CASHFLOW_BACKUP_RETENTION_DAYS = 7;
 
@@ -1535,6 +1583,456 @@ app.post('/api/import/rakuraku/commit', async (c) => {
   }
 });
 
+app.post('/api/import/cashflow/preview', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) {
+    const status = auth.status === 401 ? 401 : 403;
+    const message = status === 401 ? 'Unauthorized' : 'Forbidden';
+    const errorCode = status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN';
+    return c.json({ ok: false, errorCode, error: message, message }, status);
+  }
+  const { user, organizationId } = auth;
+
+  try {
+    const contentType = c.req.header('content-type') ?? '';
+    if (!contentType.includes('multipart/form-data')) {
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.unsupportedContentType, error: 'Content-Type must be multipart/form-data' }, 415);
+    }
+
+    let form: Record<string, unknown>;
+    try {
+      form = await c.req.parseBody();
+    } catch (error) {
+      const serialized = serializeError(error);
+      await recordAppError(c.env.DB, {
+        userId: user.id,
+        organizationId,
+        source: 'cashflow-import-preview',
+        method: c.req.method,
+        path: c.req.path,
+        statusCode: 400,
+        message: serialized.message,
+        errorName: serialized.name,
+        stack: serialized.stack,
+        detail: { phase: 'multipart-parse' }
+      });
+      console.error('cashflow import preview multipart parse failed', { userId: user.id, error });
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.multipartParseFailed, error: 'multipart/form-data の解析に失敗しました。' }, 400);
+    }
+
+    const file = form.file;
+    if (!(file instanceof File)) {
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.fileMissing, error: 'CSVファイルがありません。' }, 400);
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const text = decodeShiftJisLike(bytes);
+
+    let parsedRows: CashflowImportParsedRow[] = [];
+    try {
+      parsedRows = parseCashflowImportCsvText(text);
+    } catch (error) {
+      const serialized = serializeError(error);
+      await recordAppError(c.env.DB, {
+        userId: user.id,
+        organizationId,
+        source: 'cashflow-import-preview',
+        method: c.req.method,
+        path: c.req.path,
+        statusCode: error instanceof CsvImportParseError ? 400 : 500,
+        message: serialized.message,
+        errorName: serialized.name,
+        stack: serialized.stack,
+        detail: { phase: 'csv-parse' }
+      });
+      console.error('cashflow import preview csv parse failed', { userId: user.id, error });
+      if (error instanceof CsvImportParseError) {
+        return c.json({ ok: false, errorCode: error.code, error: error.message }, 400);
+      }
+      return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.internalError, error: 'CSVファイルの解析に失敗しました。' }, 500);
+    }
+
+    if (parsedRows.length === 0) {
+      return c.json({ ok: true, totalRows: 0, invalidRows: 0, newEntries: [], updateEntries: [], rowErrors: [], message: '取り込み可能な行がありませんでした。' });
+    }
+
+    const monthSet = new Set(parsedRows.map((row) => row.scheduledDate.slice(0, 7)));
+    const existingById = new Map<number, {
+      id: number;
+      title: string;
+      amount: number;
+      type: 'income' | 'expense';
+      scheduled_date: string;
+      note: string | null;
+      actual_transaction_date: string | null;
+      customer_name: string | null;
+      staff_name: string | null;
+      label_color: string | null;
+      cf_category: string | null;
+      is_completed: number;
+      import_management_no: string | null;
+    }>();
+    const existingByKey = new Map<string, {
+      id: number;
+      title: string;
+      amount: number;
+      type: 'income' | 'expense';
+      scheduled_date: string;
+      note: string | null;
+      actual_transaction_date: string | null;
+      customer_name: string | null;
+      staff_name: string | null;
+      label_color: string | null;
+      cf_category: string | null;
+      is_completed: number;
+      import_management_no: string | null;
+    }>();
+    const monthList = [...monthSet];
+    if (monthList.length > 0) {
+      const monthChunkSize = 80;
+      for (let i = 0; i < monthList.length; i += monthChunkSize) {
+        const chunk = monthList.slice(i, i + monthChunkSize);
+        const monthPlaceholders = chunk.map(() => '?').join(', ');
+        const rows = await c.env.DB.prepare(
+          `SELECT id, title, amount, type, scheduled_date, note, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_completed, import_management_no
+           FROM cashflow_entries
+           WHERE organization_id = ? AND deleted_at IS NULL AND substr(scheduled_date, 1, 7) IN (${monthPlaceholders})`
+        ).bind(organizationId, ...chunk).all<{
+          id: number;
+          title: string;
+          amount: number;
+          type: 'income' | 'expense';
+          scheduled_date: string;
+          note: string | null;
+          actual_transaction_date: string | null;
+          customer_name: string | null;
+          staff_name: string | null;
+          label_color: string | null;
+          cf_category: string | null;
+          is_completed: number;
+          import_management_no: string | null;
+        }>();
+        for (const row of rows.results ?? []) {
+          const existing = {
+            id: Number(row.id),
+            title: row.title || '',
+            amount: Number(row.amount || 0),
+            type: row.type,
+            scheduled_date: row.scheduled_date || '',
+            note: row.note || '',
+            actual_transaction_date: row.actual_transaction_date || '',
+            customer_name: row.customer_name || '',
+            staff_name: row.staff_name || '',
+            label_color: row.label_color || '',
+            cf_category: row.cf_category || '',
+            is_completed: Number(row.is_completed ?? 0),
+            import_management_no: row.import_management_no || ''
+          };
+          existingById.set(existing.id, existing);
+          existingByKey.set(buildCashflowImportMatchKey({
+            scheduledDate: existing.scheduled_date,
+            type: existing.type,
+            title: existing.title,
+            amount: existing.amount,
+            note: existing.note || '',
+            actualDate: existing.actual_transaction_date || '',
+            customerName: existing.customer_name || '',
+            staffName: existing.staff_name || '',
+            labelColor: existing.label_color || '',
+            cfCategory: existing.cf_category || '',
+            isCompleted: existing.is_completed,
+            managementNo: existing.import_management_no || ''
+          }), existing);
+        }
+      }
+    }
+
+    const newEntries: CashflowImportPreviewNewEntry[] = [];
+    const updateEntries: CashflowImportPreviewUpdateEntry[] = [];
+    const rowErrors: Array<{ rowNumber: number; message: string }> = [];
+
+    for (const row of parsedRows) {
+      const idValue = row.id ? Number(row.id) : null;
+      const existingByIdRow = idValue !== null && Number.isInteger(idValue) && idValue > 0 ? existingById.get(idValue) : undefined;
+      if (row.id && (!Number.isInteger(idValue as number) || (idValue as number) <= 0)) {
+        rowErrors.push({ rowNumber: row.rowNumber, message: 'IDが正しくありません。' });
+        continue;
+      }
+      if (row.id && !existingByIdRow) {
+        rowErrors.push({ rowNumber: row.rowNumber, message: `指定されたID（${row.id}）が存在しないか、更新権限がありません。` });
+        continue;
+      }
+
+      const existing = existingByIdRow || existingByKey.get(buildCashflowImportMatchKey({
+        scheduledDate: row.scheduledDate,
+        type: row.type,
+        title: row.title,
+        amount: row.amount,
+        note: row.note || '',
+        actualDate: row.actualDate || '',
+        customerName: row.customerName || '',
+        staffName: row.staffName || '',
+        labelColor: row.labelColor || '',
+        cfCategory: row.cfCategory || '',
+        isCompleted: row.isCompleted,
+        managementNo: row.managementNo || ''
+      }));
+
+      if (existing) {
+        const hasDiff = buildCashflowImportMatchKey({
+          scheduledDate: row.scheduledDate,
+          type: row.type,
+          title: row.title,
+          amount: row.amount,
+          note: row.note || '',
+          actualDate: row.actualDate || '',
+          customerName: row.customerName || '',
+          staffName: row.staffName || '',
+          labelColor: row.labelColor || '',
+          cfCategory: row.cfCategory || '',
+          isCompleted: row.isCompleted,
+          managementNo: row.managementNo || ''
+        }) !== buildCashflowImportMatchKey({
+          scheduledDate: existing.scheduled_date,
+          type: existing.type,
+          title: existing.title,
+          amount: existing.amount,
+          note: existing.note || '',
+          actualDate: existing.actual_transaction_date || '',
+          customerName: existing.customer_name || '',
+          staffName: existing.staff_name || '',
+          labelColor: existing.label_color || '',
+          cfCategory: existing.cf_category || '',
+          isCompleted: Number(existing.is_completed ?? 0),
+          managementNo: existing.import_management_no || ''
+        });
+
+        updateEntries.push({
+          rowNumber: row.rowNumber,
+          id: existing.id,
+          title: row.title,
+          amount: row.amount,
+          type: row.type,
+          scheduledDate: row.scheduledDate,
+          note: row.note,
+          actualDate: row.actualDate,
+          customerName: row.customerName,
+          staffName: row.staffName,
+          labelColor: row.labelColor,
+          cfCategory: row.cfCategory,
+          isCompleted: row.isCompleted,
+          managementNo: row.managementNo,
+          titleOld: existing.title,
+          amountOld: existing.amount,
+          typeOld: existing.type,
+          scheduledDateOld: existing.scheduled_date,
+          noteOld: existing.note || '',
+          actualDateOld: existing.actual_transaction_date,
+          customerNameOld: existing.customer_name,
+          staffNameOld: existing.staff_name,
+          labelColorOld: existing.label_color || '',
+          cfCategoryOld: existing.cf_category || '',
+          isCompletedOld: Number(existing.is_completed ?? 0),
+          managementNoOld: existing.import_management_no,
+          hasDiff
+        });
+      } else {
+        newEntries.push({
+          rowNumber: row.rowNumber,
+          title: row.title,
+          amount: row.amount,
+          type: row.type,
+          scheduledDate: row.scheduledDate,
+          note: row.note,
+          actualDate: row.actualDate,
+          customerName: row.customerName,
+          staffName: row.staffName,
+          labelColor: row.labelColor,
+          cfCategory: row.cfCategory,
+          isCompleted: row.isCompleted,
+          managementNo: row.managementNo
+        });
+      }
+    }
+
+    return c.json({
+      ok: true,
+      totalRows: parsedRows.length,
+      invalidRows: rowErrors.length,
+      newEntries,
+      updateEntries,
+      rowErrors,
+      message: 'CSVの確認が完了しました。'
+    });
+  } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'cashflow-import-preview',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack
+    });
+    console.error('cashflow import preview failed', { userId: user.id, error });
+    return c.json({ ok: false, error: 'CSV取り込み確認中にエラーが発生しました。' }, 500);
+  }
+});
+
+app.post('/api/import/cashflow/commit', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) {
+    const status = auth.status === 401 ? 401 : 403;
+    const message = status === 401 ? 'Unauthorized' : 'Forbidden';
+    const errorCode = status === 401 ? 'UNAUTHORIZED' : 'FORBIDDEN';
+    return c.json({ ok: false, errorCode, error: message, message }, status);
+  }
+  const { user, organizationId } = auth;
+
+  try {
+    const body = await parseJsonBody<{
+      newEntries?: Array<CashflowImportPreviewNewEntry>;
+      updateEntries?: Array<CashflowImportPreviewUpdateEntry>;
+    }>(c);
+    if (!body) {
+      return c.json({ ok: false, error: 'リクエストボディがありません。' }, 400);
+    }
+
+    const newEntries = Array.isArray(body.newEntries) ? body.newEntries : [];
+    const updateEntries = Array.isArray(body.updateEntries) ? body.updateEntries : [];
+    if (newEntries.length === 0 && updateEntries.length === 0) {
+      return c.json({ ok: true, insertedCount: 0, updatedCount: 0, message: '適用するデータがありません。' });
+    }
+
+    const monthSet = new Set<string>();
+    for (const row of newEntries) monthSet.add(String(row.scheduledDate || '').slice(0, 7));
+    for (const row of updateEntries) monthSet.add(String(row.scheduledDate || '').slice(0, 7));
+    const monthList = [...monthSet].filter((v) => v !== '');
+    const orderMap = new Map<string, number>();
+    if (monthList.length > 0) {
+      for (const m of monthList) orderMap.set(m, 0);
+      const monthChunkSize = 80;
+      for (let i = 0; i < monthList.length; i += monthChunkSize) {
+        const chunk = monthList.slice(i, i + monthChunkSize);
+        const monthPlaceholders = chunk.map(() => '?').join(', ');
+        const maxRows = await c.env.DB.prepare(
+          `SELECT substr(scheduled_date, 1, 7) as month, COALESCE(MAX(order_index), 0) as max_order
+           FROM cashflow_entries
+           WHERE organization_id = ? AND deleted_at IS NULL AND substr(scheduled_date, 1, 7) IN (${monthPlaceholders})
+           GROUP BY substr(scheduled_date, 1, 7)`
+        )
+          .bind(organizationId, ...chunk)
+          .all<{ month: string; max_order: number }>();
+        for (const row of maxRows.results ?? []) {
+          orderMap.set(row.month, Number(row.max_order ?? 0));
+        }
+      }
+    }
+
+    const statements: D1PreparedStatement[] = [];
+    let updatedCount = 0;
+    for (const row of updateEntries) {
+      const id = Number(row.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        continue;
+      }
+      statements.push(
+        c.env.DB.prepare(
+          `UPDATE cashflow_entries
+           SET title = ?, amount = ?, type = ?, scheduled_date = ?, note = ?, actual_transaction_date = ?,
+               customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?,
+               is_completed = ?, import_management_no = ?, updated_at = datetime('now')
+           WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
+        ).bind(
+          row.title,
+          row.amount,
+          row.type,
+          row.scheduledDate,
+          row.note || null,
+          row.actualDate || null,
+          row.customerName || null,
+          row.staffName || null,
+          row.labelColor || '',
+          row.cfCategory || '',
+          row.isCompleted,
+          row.managementNo || null,
+          id,
+          organizationId
+        )
+      );
+      updatedCount += 1;
+    }
+
+    let insertedCount = 0;
+    for (const row of newEntries) {
+      const month = String(row.scheduledDate || '').slice(0, 7);
+      let nextOrder = Number(orderMap.get(month) ?? 0);
+      nextOrder += 1;
+      orderMap.set(month, nextOrder);
+
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO cashflow_entries
+            (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
+             actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
+        ).bind(
+          user.id,
+          organizationId,
+          row.title,
+          row.amount,
+          row.type,
+          row.scheduledDate,
+          nextOrder,
+          row.note || null,
+          row.actualDate || null,
+          row.customerName || null,
+          row.staffName || null,
+          row.labelColor || '',
+          row.cfCategory || '',
+          row.isCompleted,
+          user.id,
+          row.managementNo || null
+        )
+      );
+      insertedCount += 1;
+    }
+
+    if (statements.length > 0) {
+      const writeChunkSize = 40;
+      for (let i = 0; i < statements.length; i += writeChunkSize) {
+        const chunk = statements.slice(i, i + writeChunkSize);
+        await c.env.DB.batch(chunk);
+      }
+    }
+
+    return c.json({
+      ok: true,
+      insertedCount,
+      updatedCount,
+      message: 'インポート適用が完了しました。'
+    });
+  } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'cashflow-import-commit',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack
+    });
+    console.error('cashflow import commit failed', { userId: user.id, error });
+    return c.json({ ok: false, error: 'インポート確定処理中にエラーが発生しました。' }, 500);
+  }
+});
+
 app.post('/api/import/cashflow', async (c) => {
   const auth = requireOrganizationContext(c);
   if (auth instanceof Response) {
@@ -2965,6 +3463,46 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .diff-same {
       color: var(--muted);
     }
+    .cashflow-import-preview-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 10px;
+      background: #fff;
+    }
+    .cashflow-import-preview-table th,
+    .cashflow-import-preview-table td {
+      padding: 8px;
+      border: 1px solid var(--line);
+      vertical-align: middle;
+      text-align: left;
+    }
+    .cashflow-import-preview-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .cashflow-import-preview-badge.warn {
+      background: #fff7ed;
+      color: #c2410c;
+    }
+    .cashflow-import-preview-badge.ok {
+      background: #ecfdf5;
+      color: #047857;
+    }
+    .cashflow-import-preview-badge.muted {
+      background: #f1f5f9;
+      color: #475569;
+    }
+    .cashflow-import-preview-muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
     .import-result-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3448,6 +3986,22 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   </div>
 </div>
 
+<div id="cashflow-import-preview-modal" class="modal-overlay">
+  <div class="modal-box" style="max-width: 1120px; width: 96%;">
+    <span id="cashflow-import-preview-close" class="modal-close">&times;</span>
+    <h3 id="cashflow-import-preview-title" style="margin-top:0;">CSV取込み確認</h3>
+    <div id="cashflow-import-preview-summary" style="font-size:13px; color:var(--muted); margin-bottom:12px;"></div>
+    <div id="cashflow-import-preview-body"></div>
+    <div style="margin-top:16px; display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap;">
+      <span id="cashflow-import-preview-caption" class="cashflow-import-preview-muted">更新候補 0 件</span>
+      <div style="display:flex; gap:8px;">
+        <button id="cashflow-import-preview-cancel" type="button" class="secondary" style="padding:8px 20px; font-size:13px; cursor:pointer;">キャンセル</button>
+        <button id="cashflow-import-preview-submit" type="button" class="primary" style="padding:8px 20px; font-size:13px; cursor:pointer;">インポート実行</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="entry-edit-modal" class="modal-overlay">
   <div class="modal-box" style="max-width: 980px; width: 96%;">
     <span id="entry-edit-close" class="modal-close">&times;</span>
@@ -3589,6 +4143,14 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const importResultBody = document.getElementById('import-result-body');
   const importResultClose = document.getElementById('import-result-close');
   const importResultOk = document.getElementById('import-result-ok');
+  const cashflowImportPreviewModal = document.getElementById('cashflow-import-preview-modal');
+  const cashflowImportPreviewTitle = document.getElementById('cashflow-import-preview-title');
+  const cashflowImportPreviewSummary = document.getElementById('cashflow-import-preview-summary');
+  const cashflowImportPreviewBody = document.getElementById('cashflow-import-preview-body');
+  const cashflowImportPreviewCaption = document.getElementById('cashflow-import-preview-caption');
+  const cashflowImportPreviewClose = document.getElementById('cashflow-import-preview-close');
+  const cashflowImportPreviewCancel = document.getElementById('cashflow-import-preview-cancel');
+  const cashflowImportPreviewSubmit = document.getElementById('cashflow-import-preview-submit');
   const entryEditModal = document.getElementById('entry-edit-modal');
   const entryEditForm = document.getElementById('entry-edit-form');
   const entryEditId = document.getElementById('entry-edit-id');
@@ -4969,6 +5531,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
   });
   let pendingImportData = null;
+  let pendingCashflowImportPreview: {
+    newEntries: Array<CashflowImportPreviewNewEntry>;
+    updateEntries: Array<CashflowImportPreviewUpdateEntry>;
+    rowErrors: Array<{ rowNumber: number; message: string }>;
+  } | null = null;
 
   importRakurakuCsvBtn.addEventListener('click', async () => {
     const file = rakurakuCsvFileInput && rakurakuCsvFileInput.files ? rakurakuCsvFileInput.files[0] : null;
@@ -5065,6 +5632,130 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     return new Intl.NumberFormat('ja-JP', { style: 'currency', currency: 'JPY' }).format(val);
   }
 
+  function closeCashflowImportPreviewModal() {
+    pendingCashflowImportPreview = null;
+    if (cashflowImportPreviewModal) cashflowImportPreviewModal.style.display = 'none';
+    if (cashflowCsvFileInput) cashflowCsvFileInput.value = '';
+  }
+
+  function syncCashflowImportPreviewSelection() {
+    if (!pendingCashflowImportPreview) return;
+    const total = pendingCashflowImportPreview.updateEntries.length;
+    const checks = document.querySelectorAll('.cashflow-import-update-check');
+    let selected = 0;
+    checks.forEach((chk) => {
+      if (chk.checked) selected += 1;
+    });
+    if (cashflowImportPreviewCaption) {
+      cashflowImportPreviewCaption.textContent = '更新 ' + String(selected) + ' / ' + String(total) + ' 件 / 新規 ' + String(pendingCashflowImportPreview.newEntries.length) + ' 件';
+    }
+    const selectAll = document.getElementById('cashflow-import-update-select-all');
+    if (selectAll instanceof HTMLInputElement) {
+      selectAll.checked = total > 0 && selected === total;
+      selectAll.indeterminate = selected > 0 && selected < total;
+    }
+  }
+
+  function showCashflowImportPreviewModal(result) {
+    if (!cashflowImportPreviewModal || !cashflowImportPreviewTitle || !cashflowImportPreviewSummary || !cashflowImportPreviewBody) return;
+    const newEntries = Array.isArray(result.newEntries) ? result.newEntries : [];
+    const updateEntries = Array.isArray(result.updateEntries) ? result.updateEntries : [];
+    const rowErrors = Array.isArray(result.rowErrors) ? result.rowErrors : [];
+    pendingCashflowImportPreview = { newEntries, updateEntries, rowErrors };
+
+    cashflowImportPreviewTitle.textContent = String(result.title || 'CSV取込み確認');
+    cashflowImportPreviewSummary.textContent = String(result.summary || '');
+
+    const stats = result.stats || {};
+    const cards = [];
+    if (stats.totalRows !== undefined) {
+      cards.push('<div class="import-result-card"><div class="import-result-label">対象行</div><div class="import-result-value">' + escapeHtml(String(stats.totalRows ?? 0)) + '</div></div>');
+    }
+    cards.push('<div class="import-result-card"><div class="import-result-label">新規追加</div><div class="import-result-value ok">' + escapeHtml(String(newEntries.length)) + '</div></div>');
+    cards.push('<div class="import-result-card"><div class="import-result-label">更新候補</div><div class="import-result-value warn">' + escapeHtml(String(updateEntries.length)) + '</div></div>');
+    cards.push('<div class="import-result-card"><div class="import-result-label">失敗</div><div class="import-result-value error">' + escapeHtml(String(rowErrors.length)) + '</div></div>');
+
+    const updateRowsHtml = updateEntries.map((row, idx) => {
+      const statusClass = row.hasDiff ? 'warn' : 'ok';
+      const statusLabel = row.hasDiff ? '差分あり' : '同一';
+      return [
+        '<tr>',
+        '<td style="text-align:center;"><input type="checkbox" class="cashflow-import-update-check" data-idx="' + String(idx) + '" checked /></td>',
+        '<td>' + escapeHtml(String(row.rowNumber ?? '-')) + '</td>',
+        '<td>' + escapeHtml(String(row.id ?? '-')) + '</td>',
+        '<td>' + escapeHtml(String(row.managementNoOld || row.managementNo || '')) + '</td>',
+        '<td><span class="cashflow-import-preview-badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span></td>',
+        '<td>' + formatDiffCell(row.titleOld, row.title) + '</td>',
+        '<td>' + formatDiffCell(formatCurrency(row.amountOld), formatCurrency(row.amount)) + '</td>',
+        '<td>' + formatDiffCell(row.scheduledDateOld, row.scheduledDate) + '</td>',
+        '<td>' + formatDiffCell(row.customerNameOld || '', row.customerName || '') + '</td>',
+        '</tr>'
+      ].join('');
+    }).join('');
+
+    const rowErrorHtml = rowErrors.length > 0
+      ? [
+          '<div style="margin-top:12px;">',
+          '<div style="font-weight:700; margin-bottom:8px;">行エラー</div>',
+          '<div class="table-wrap" style="overflow:auto; border:1px solid var(--line); border-radius:10px;">',
+          '<table class="import-result-table">',
+          '<thead><tr><th>行</th><th>内容</th></tr></thead>',
+          '<tbody>',
+          rowErrors.slice(0, 20).map((row) => '<tr><td>' + escapeHtml(String(row.rowNumber ?? '-')) + '</td><td>' + escapeHtml(String(row.message ?? '')) + '</td></tr>').join(''),
+          rowErrors.length > 20 ? '<tr><td colspan="2" class="muted">他 ' + String(rowErrors.length - 20) + ' 件</td></tr>' : '',
+          '</tbody></table></div></div>'
+        ].join('')
+      : '';
+
+    cashflowImportPreviewBody.innerHTML = [
+      '<div class="import-result-grid">',
+      cards.join(''),
+      '</div>',
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px;">',
+      '<span class="cashflow-import-preview-muted">新規は自動で追加されます。更新候補は必要なものだけ選択してください。</span>',
+      '<label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap;"><input type="checkbox" id="cashflow-import-update-select-all" ' + (updateEntries.length > 0 ? 'checked' : '') + ' /> すべて選択</label>',
+      '</div>',
+      '<div class="table-wrap" style="max-height: 50vh; overflow-y: auto;">',
+      '<table class="cashflow-import-preview-table">',
+      '<thead>',
+      '<tr style="background:#f5f8fb; color:#334e68; font-weight:700;">',
+      '<th style="width:50px; text-align:center;">選択</th>',
+      '<th style="width:64px;">行</th>',
+      '<th style="width:80px;">ID</th>',
+      '<th style="width:120px;">管理番号</th>',
+      '<th style="width:88px;">状態</th>',
+      '<th>件名 (DB &rarr; CSV)</th>',
+      '<th>金額 (DB &rarr; CSV)</th>',
+      '<th>予定日 (DB &rarr; CSV)</th>',
+      '<th>顧客名 (DB &rarr; CSV)</th>',
+      '</tr>',
+      '</thead>',
+      '<tbody>',
+      updateRowsHtml || '<tr><td colspan="9" class="muted" style="padding:12px;">更新候補はありません。</td></tr>',
+      '</tbody>',
+      '</table>',
+      '</div>',
+      rowErrorHtml
+    ].join('');
+
+    cashflowImportPreviewModal.style.display = 'flex';
+    const selectAll = document.getElementById('cashflow-import-update-select-all');
+    if (selectAll instanceof HTMLInputElement) {
+      selectAll.addEventListener('change', () => {
+        const checks = document.querySelectorAll('.cashflow-import-update-check');
+        checks.forEach((chk) => {
+          chk.checked = selectAll.checked;
+        });
+        syncCashflowImportPreviewSelection();
+      });
+    }
+    const checks = document.querySelectorAll('.cashflow-import-update-check');
+    checks.forEach((chk) => {
+      chk.addEventListener('change', syncCashflowImportPreviewSelection);
+    });
+    syncCashflowImportPreviewSelection();
+  }
+
   function closeImportResultModal() {
     if (importResultModal) importResultModal.style.display = 'none';
   }
@@ -5140,6 +5831,105 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       rowErrorsHtml
     ].join('');
     importResultModal.style.display = 'flex';
+  }
+
+  function collectCashflowImportPreviewSelection() {
+    if (!pendingCashflowImportPreview) {
+      return { newEntries: [], updateEntries: [] };
+    }
+    const selectedUpdateEntries = [];
+    const checks = document.querySelectorAll('.cashflow-import-update-check');
+    checks.forEach((chk) => {
+      if (!(chk instanceof HTMLInputElement) || !chk.checked) return;
+      const idx = Number(chk.dataset.idx);
+      if (!Number.isInteger(idx)) return;
+      const row = pendingCashflowImportPreview?.updateEntries[idx];
+      if (!row) return;
+      selectedUpdateEntries.push({
+        rowNumber: row.rowNumber,
+        id: row.id,
+        title: row.title,
+        amount: row.amount,
+        type: row.type,
+        scheduledDate: row.scheduledDate,
+        note: row.note,
+        actualDate: row.actualDate,
+        customerName: row.customerName,
+        staffName: row.staffName,
+        labelColor: row.labelColor,
+        cfCategory: row.cfCategory,
+        isCompleted: row.isCompleted,
+        managementNo: row.managementNo
+      });
+    });
+    return {
+      newEntries: pendingCashflowImportPreview.newEntries.map((row) => ({
+        rowNumber: row.rowNumber,
+        title: row.title,
+        amount: row.amount,
+        type: row.type,
+        scheduledDate: row.scheduledDate,
+        note: row.note,
+        actualDate: row.actualDate,
+        customerName: row.customerName,
+        staffName: row.staffName,
+        labelColor: row.labelColor,
+        cfCategory: row.cfCategory,
+        isCompleted: row.isCompleted,
+        managementNo: row.managementNo
+      })),
+      updateEntries: selectedUpdateEntries
+    };
+  }
+
+  async function commitCashflowImport() {
+    if (!pendingCashflowImportPreview) return;
+    const selection = collectCashflowImportPreviewSelection();
+    if (selection.newEntries.length === 0 && selection.updateEntries.length === 0) {
+      showBanner(statusBanner, 'warn', '反映対象が選択されていません。');
+      return;
+    }
+    if (cashflowImportPreviewSubmit) cashflowImportPreviewSubmit.disabled = true;
+    try {
+      const res = await fetch('/api/import/cashflow/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(selection)
+      });
+      const rawBody = await res.text();
+      const payload = safeJsonParse(rawBody) || {};
+      if (!res.ok || !payload.ok) {
+        showImportResultModal({
+          title: 'CSV取込み結果',
+          status: 'error',
+          message: buildApiErrorMessage(payload, rawBody, 'インポートの確定に失敗しました。'),
+          summary: 'CSVの確定処理でエラーが発生しました。',
+          stats: {
+            httpStatus: res.status,
+            errorCode: payload.errorCode || '',
+            requestId: payload.requestId || ''
+          },
+          stack: payload.stack || rawBody
+        });
+        return;
+      }
+      closeCashflowImportPreviewModal();
+      showImportResultModal({
+        title: 'CSV取込み結果',
+        status: 'ok',
+        message: 'CSV取込みが完了しました。',
+        summary: '新規追加 ' + String(payload.insertedCount || 0) + ' 件 / 更新 ' + String(payload.updatedCount || 0) + ' 件',
+        stats: {
+          insertedCount: payload.insertedCount || 0,
+          updatedCount: payload.updatedCount || 0
+        }
+      });
+      await loadAll();
+    } catch (_) {
+      showBanner(statusBanner, 'error', 'インポートの確定中にエラーが発生しました。');
+    } finally {
+      if (cashflowImportPreviewSubmit) cashflowImportPreviewSubmit.disabled = false;
+    }
   }
 
   if (rakurakuDiffSelectAll) {
@@ -5245,6 +6035,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   importResultModal?.addEventListener('click', (ev) => {
     if (ev.target === importResultModal) closeImportResultModal();
   });
+  cashflowImportPreviewClose?.addEventListener('click', closeCashflowImportPreviewModal);
+  cashflowImportPreviewCancel?.addEventListener('click', closeCashflowImportPreviewModal);
+  cashflowImportPreviewSubmit?.addEventListener('click', commitCashflowImport);
+  cashflowImportPreviewModal?.addEventListener('click', (ev) => {
+    if (ev.target === cashflowImportPreviewModal) closeCashflowImportPreviewModal();
+  });
 
   importCashflowCsvBtn?.addEventListener('click', () => {
     cashflowCsvFileInput?.click();
@@ -5259,7 +6055,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await fetch('/api/import/cashflow', {
+      const res = await fetch('/api/import/cashflow/preview', {
         method: 'POST',
         body: formData
       });
@@ -5280,29 +6076,41 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         });
         return;
       }
+      const newEntries = Array.isArray(payload.newEntries) ? payload.newEntries : [];
+      const updateEntries = Array.isArray(payload.updateEntries) ? payload.updateEntries : [];
       const rowErrors = Array.isArray(payload.rowErrors) ? payload.rowErrors : [];
-      const failedRows = Number(payload.failedRows ?? rowErrors.length ?? 0);
-      const hasPartialFailure = failedRows > 0 || rowErrors.length > 0;
-      showImportResultModal({
-        title: 'CSV取込み結果',
-        status: hasPartialFailure ? 'warn' : 'ok',
-        message: hasPartialFailure
-          ? 'CSV取込みは完了しましたが、一部の行はスキップされました。'
-          : 'CSV取込みが完了しました。',
-        summary: hasPartialFailure
-          ? '件数と行エラーを確認してください。'
-          : '取り込み結果を確認してください。',
+      const hasImportableRows = newEntries.length > 0 || updateEntries.length > 0;
+      if (!hasImportableRows) {
+        showImportResultModal({
+          title: 'CSV取込み結果',
+          status: rowErrors.length > 0 ? 'warn' : 'ok',
+          message: rowErrors.length > 0
+            ? 'CSV取込み対象の行はありませんでした。'
+            : 'CSV取込み対象の新規データ、または更新対象データはありませんでした。',
+          summary: rowErrors.length > 0
+            ? '行エラーを確認してください。'
+            : '取り込み結果を確認してください。',
+          stats: {
+            totalRows: payload.totalRows ?? '',
+            invalidRows: payload.invalidRows ?? '',
+            skippedRows: payload.skippedRows ?? ''
+          },
+          rowErrors
+        });
+        return;
+      }
+      showCashflowImportPreviewModal({
+        title: 'CSV取込み確認',
+        summary: '新規データは自動で追加されます。更新候補は必要なものだけ選択してください。',
         stats: {
           totalRows: payload.totalRows ?? '',
-          insertedEntries: payload.insertedEntries ?? 0,
-          updatedEntries: payload.updatedEntries ?? 0,
-          failedRows,
           invalidRows: payload.invalidRows ?? '',
           skippedRows: payload.skippedRows ?? ''
         },
+        newEntries,
+        updateEntries,
         rowErrors
       });
-      await loadAll();
     } catch (_) {
       showImportResultModal({
         title: 'CSV取込み結果',
@@ -7479,6 +8287,127 @@ function parseRakurakuCsvText(text: string): Array<{
     });
   }
   return rows;
+}
+
+function parseCashflowImportCsvText(text: string): CashflowImportParsedRow[] {
+  const records = parseCsvRecords(text);
+  if (records.length === 0) {
+    throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.csvEmpty, 'CSVファイルが空です。');
+  }
+  if (records.length === 1) {
+    throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.csvEmpty, 'CSVデータ行がありません。');
+  }
+
+  const header = records[0].map((cell) => cell.replace(/^\uFEFF/, '').trim());
+  const idx = {
+    id: header.indexOf('ID'),
+    scheduledDate: header.indexOf('予定日'),
+    type: header.indexOf('区分'),
+    cfCategory: header.indexOf('CF区分'),
+    title: header.indexOf('件名'),
+    amount: header.indexOf('金額'),
+    note: header.indexOf('メモ'),
+    actualDate: header.indexOf('入出金日'),
+    customerName: header.indexOf('顧客名'),
+    staffName: header.indexOf('担当社員名'),
+    completed: header.indexOf('完了状態'),
+    labelColor: header.indexOf('ラベル'),
+    managementNo: header.indexOf('管理番号')
+  };
+
+  if (idx.scheduledDate < 0 || idx.type < 0 || idx.title < 0 || idx.amount < 0) {
+    throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.csvHeaderMismatch, 'CSVヘッダーに必要な項目（予定日, 区分, 件名, 金額）が含まれていません。');
+  }
+
+  const rows: CashflowImportParsedRow[] = [];
+  for (let i = 1; i < records.length; i += 1) {
+    const cols = records[i] ?? [];
+    if (cols.every((cell) => String(cell ?? '').trim() === '')) continue;
+
+    const id = idx.id >= 0 ? String(cols[idx.id] ?? '').trim() : '';
+    const rawScheduledDate = String(cols[idx.scheduledDate] ?? '').trim();
+    const rawType = String(cols[idx.type] ?? '').trim();
+    const title = String(cols[idx.title] ?? '').trim();
+    const rawAmountVal = String(cols[idx.amount] ?? '').replaceAll(',', '').trim();
+    const amount = Number(rawAmountVal);
+    const note = idx.note >= 0 ? String(cols[idx.note] ?? '').trim() : '';
+    const actualDate = idx.actualDate >= 0 ? String(cols[idx.actualDate] ?? '').trim() : '';
+    const customerName = idx.customerName >= 0 ? String(cols[idx.customerName] ?? '').trim() : '';
+    const staffName = idx.staffName >= 0 ? String(cols[idx.staffName] ?? '').trim() : '';
+    const completed = idx.completed >= 0 ? String(cols[idx.completed] ?? '').trim() : '';
+    const labelColor = idx.labelColor >= 0 ? String(cols[idx.labelColor] ?? '').trim() : '';
+    const managementNo = idx.managementNo >= 0 ? String(cols[idx.managementNo] ?? '').trim() : '';
+    const cfCategory = idx.cfCategory >= 0 ? String(cols[idx.cfCategory] ?? '').trim() : '';
+
+    const scheduledDate = parseSlashOrIsoDate(rawScheduledDate);
+    if (!scheduledDate) {
+      throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.internalError, `予定日の日付形式が正しくありません。${i + 1}行目`);
+    }
+    let type: 'income' | 'expense';
+    if (rawType === '入金') {
+      type = 'income';
+    } else if (rawType === '出金') {
+      type = 'expense';
+    } else {
+      throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.internalError, `区分は「入金」または「出金」で入力してください。${i + 1}行目`);
+    }
+    if (title === '') {
+      throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.internalError, `件名が入力されていません。${i + 1}行目`);
+    }
+    if (rawAmountVal === '' || isNaN(amount) || amount < 0) {
+      throw new CsvImportParseError(CSV_IMPORT_ERROR_CODES.internalError, `金額が正しくありません（1以上の整数）。${i + 1}行目`);
+    }
+
+    rows.push({
+      rowNumber: i + 1,
+      id,
+      scheduledDate,
+      type,
+      title: title.slice(0, 120),
+      amount,
+      note: note || '',
+      actualDate: parseSlashOrIsoDate(actualDate) || '',
+      customerName: customerName || '',
+      staffName: staffName || '',
+      isCompleted: completed === '完了' ? 1 : 0,
+      labelColor: labelColor || '',
+      managementNo: managementNo || '',
+      cfCategory: cfCategory || '',
+      cfCategorySpecified: idx.cfCategory >= 0
+    });
+  }
+
+  return rows;
+}
+
+function buildCashflowImportMatchKey(row: {
+  scheduledDate: string;
+  type: 'income' | 'expense';
+  title: string;
+  amount: number;
+  note: string;
+  actualDate: string;
+  customerName: string;
+  staffName: string;
+  labelColor: string;
+  cfCategory: string;
+  isCompleted: number;
+  managementNo: string;
+}): string {
+  return [
+    row.scheduledDate,
+    row.type,
+    row.title,
+    String(row.amount),
+    row.note,
+    row.actualDate,
+    row.customerName,
+    row.staffName,
+    row.labelColor,
+    row.cfCategory,
+    String(row.isCompleted),
+    row.managementNo
+  ].join('\u0001');
 }
 
 function parseLimit(limitRaw?: string | null): number | null {

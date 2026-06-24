@@ -800,6 +800,111 @@ describe('rakuraku csv import errors', () => {
     );
   });
 
+  it('previews and commits cashflow csv rows with update selections', async () => {
+    const organizationId = await createOrganization('csv-preview-org');
+    const cookie = await createAuthedCookie('csv-preview@example.com', { organizationId });
+    const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+
+    const seedCsv = [
+      ['ID', '予定日', '区分', 'CF区分', '件名', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'].map(quote).join(','),
+      ['', '2026-05-10', '入金', '', '既存案件', '1000', '', '', '顧客A', '担当A', '未完了', 'blue', 'M-300'].map(quote).join(',')
+    ].join('\n');
+
+    const seedRes = await fetchApp('/api/import/cashflow', {
+      method: 'POST',
+      headers: { cookie },
+      body: (() => {
+        const formData = new FormData();
+        formData.append('file', new File([seedCsv], 'seed.csv', { type: 'text/csv' }));
+        return formData;
+      })()
+    });
+    expect(seedRes.status).toBe(200);
+
+    const seededRow = await env.DB.prepare(
+       `SELECT id, title, amount, scheduled_date, customer_name
+       FROM cashflow_entries
+       WHERE organization_id = ? AND deleted_at IS NULL AND title = '既存案件'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).bind(organizationId).all<{ id: number; title: string; amount: number; scheduled_date: string; customer_name: string | null }>();
+    expect(seededRow.results).toHaveLength(1);
+    const seededId = seededRow.results?.[0].id as number;
+
+    const previewCsv = [
+      ['ID', '予定日', '区分', 'CF区分', '件名', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'].map(quote).join(','),
+      [String(seededId), '2026-05-10', '入金', '', '更新案件', '1500', '', '', '顧客B', '担当B', '未完了', 'blue', 'M-300'].map(quote).join(','),
+      ['', '2026-05-11', '出金', '', '新規案件', '800', '', '', '顧客C', '担当C', '未完了', 'green', 'M-301'].map(quote).join(',')
+    ].join('\n');
+
+    const previewForm = new FormData();
+    previewForm.append('file', new File([previewCsv], 'preview.csv', { type: 'text/csv' }));
+    const previewRes = await fetchApp('/api/import/cashflow/preview', {
+      method: 'POST',
+      headers: { cookie },
+      body: previewForm
+    });
+
+    expect(previewRes.status).toBe(200);
+    const previewPayload = await previewRes.json<{
+      ok: boolean;
+      newEntries: Array<{ title: string }>;
+      updateEntries: Array<{ id: number; hasDiff: boolean; title: string }>;
+    }>();
+    expect(previewPayload.ok).toBe(true);
+    expect(previewPayload.newEntries).toHaveLength(1);
+    expect(previewPayload.updateEntries).toHaveLength(1);
+    expect(previewPayload.updateEntries[0].hasDiff).toBe(true);
+
+    const commitRes = await fetchApp('/api/import/cashflow/commit', {
+      method: 'POST',
+      headers: {
+        cookie,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        newEntries: previewPayload.newEntries,
+        updateEntries: previewPayload.updateEntries
+      })
+    });
+
+    expect(commitRes.status).toBe(200);
+    const commitPayload = await commitRes.json<{ ok: boolean; insertedCount: number; updatedCount: number }>();
+    expect(commitPayload.ok).toBe(true);
+    expect(commitPayload.insertedCount).toBe(1);
+    expect(commitPayload.updatedCount).toBe(1);
+
+    const updatedRows = await env.DB.prepare(
+       `SELECT title, amount, type, scheduled_date, customer_name, staff_name, import_management_no
+       FROM cashflow_entries
+       WHERE organization_id = ? AND deleted_at IS NULL
+       ORDER BY id ASC`
+    ).bind(organizationId).all<{ title: string; amount: number; type: string; scheduled_date: string; customer_name: string | null; staff_name: string | null; import_management_no: string | null }>();
+
+    expect(updatedRows.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: '更新案件',
+          amount: 1500,
+          type: 'income',
+          scheduled_date: '2026-05-10',
+          customer_name: '顧客B',
+          staff_name: '担当B',
+          import_management_no: 'M-300'
+        }),
+        expect.objectContaining({
+          title: '新規案件',
+          amount: 800,
+          type: 'expense',
+          scheduled_date: '2026-05-11',
+          customer_name: '顧客C',
+          staff_name: '担当C',
+          import_management_no: 'M-301'
+        })
+      ])
+    );
+  });
+
   it('stores error logs for malformed multipart csv imports and shows them in admin view', async () => {
     const cookie = await createAuthedCookie('error-log-admin@example.com', { isAdmin: true, role: 'owner' });
     const res = await fetchApp('/api/import/cashflow', {
