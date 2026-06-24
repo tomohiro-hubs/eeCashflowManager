@@ -2965,6 +2965,81 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .diff-same {
       color: var(--muted);
     }
+    .import-result-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .import-result-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      background: #f9fbfd;
+    }
+    .import-result-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .import-result-value {
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .import-result-value.ok { color: var(--income); }
+    .import-result-value.warn { color: #b26a00; }
+    .import-result-value.error { color: var(--expense); }
+    .import-result-message {
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+    .import-result-message.ok { background: var(--ok-bg); border-color: var(--ok-line); color: #155e36; }
+    .import-result-message.warn { background: var(--warn-bg); border-color: var(--warn-line); color: #7a5300; }
+    .import-result-message.error { background: #fff1f2; border-color: #f3b3bc; color: #9b1c31; }
+    .import-result-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 10px;
+    }
+    .import-result-table th,
+    .import-result-table td {
+      padding: 8px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    .import-result-table th {
+      background: #f5f8fb;
+      color: #334e68;
+      font-weight: 700;
+    }
+    .import-result-stack {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 240px;
+      overflow: auto;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    @media (max-width: 900px) {
+      .import-result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 560px) {
+      .import-result-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -3361,6 +3436,18 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   </div>
 </div>
 
+<div id="import-result-modal" class="modal-overlay">
+  <div class="modal-box" style="max-width: 920px; width: 95%;">
+    <span id="import-result-close" class="modal-close">&times;</span>
+    <h3 id="import-result-title" style="margin-top:0;">CSV取込み結果</h3>
+    <div id="import-result-summary" style="font-size:13px; color:var(--muted); margin-bottom:12px;"></div>
+    <div id="import-result-body"></div>
+    <div style="margin-top:16px; text-align:right;">
+      <button id="import-result-ok" type="button" class="primary" style="padding:8px 20px; font-size:13px; cursor:pointer;">閉じる</button>
+    </div>
+  </div>
+</div>
+
 <div id="entry-edit-modal" class="modal-overlay">
   <div class="modal-box" style="max-width: 980px; width: 96%;">
     <span id="entry-edit-close" class="modal-close">&times;</span>
@@ -3496,6 +3583,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const rakurakuNewCount = document.getElementById('rakuraku-new-count');
   const rakurakuDiffSummary = document.getElementById('rakuraku-diff-summary');
   const rakurakuDiffSelectAll = document.getElementById('rakuraku-diff-select-all');
+  const importResultModal = document.getElementById('import-result-modal');
+  const importResultTitle = document.getElementById('import-result-title');
+  const importResultSummary = document.getElementById('import-result-summary');
+  const importResultBody = document.getElementById('import-result-body');
+  const importResultClose = document.getElementById('import-result-close');
+  const importResultOk = document.getElementById('import-result-ok');
   const entryEditModal = document.getElementById('entry-edit-modal');
   const entryEditForm = document.getElementById('entry-edit-form');
   const entryEditId = document.getElementById('entry-edit-id');
@@ -4972,6 +5065,83 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     return new Intl.NumberFormat('ja-JP', { style: 'currency', currency: 'JPY' }).format(val);
   }
 
+  function closeImportResultModal() {
+    if (importResultModal) importResultModal.style.display = 'none';
+  }
+
+  function showImportResultModal(result) {
+    if (!importResultModal || !importResultTitle || !importResultSummary || !importResultBody) return;
+    const status = String(result.status || 'info');
+    const title = String(result.title || 'CSV取込み結果');
+    importResultTitle.textContent = title;
+    importResultSummary.textContent = String(result.summary || '');
+    const stats = result.stats || {};
+    const rows = Array.isArray(result.rowErrors) ? result.rowErrors : [];
+    const limit = 20;
+    const rowErrorItems = rows.slice(0, limit).map((row) => '<tr><td>' + escapeHtml(String(row.rowNumber ?? '-')) + '</td><td>' + escapeHtml(String(row.message ?? '')) + '</td></tr>').join('');
+    const rowErrorsHtml = rows.length > 0
+      ? [
+          '<div style="margin-top:12px;">',
+          '<div style="font-weight:700; margin-bottom:8px;">行エラー</div>',
+          '<div style="overflow:auto; border:1px solid var(--line); border-radius:10px;">',
+          '<table class="import-result-table">',
+          '<thead><tr><th>行</th><th>内容</th></tr></thead>',
+          '<tbody>',
+          rowErrorItems,
+          rows.length > limit ? '<tr><td colspan="2" class="muted">他 ' + String(rows.length - limit) + ' 件</td></tr>' : '',
+          '</tbody></table></div></div>'
+        ].join('')
+      : '';
+
+    const labels = {
+      totalRows: '取込対象行',
+      insertedEntries: '新規追加',
+      updatedEntries: '更新',
+      failedRows: '失敗',
+      invalidRows: '無効行',
+      skippedRows: 'スキップ',
+      importedRawRows: '読込行',
+      insertedCount: '新規追加',
+      updatedCount: '更新'
+    };
+
+    const detailRows = Object.entries(stats)
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+      .map(([key, value]) => '<tr><th>' + escapeHtml(labels[key] || key) + '</th><td>' + escapeHtml(String(value)) + '</td></tr>')
+      .join('');
+
+    const messageHtml = result.message
+      ? '<div class="import-result-message ' + escapeHtml(status) + '">' + escapeHtml(String(result.message)) + '</div>'
+      : '';
+
+    const stackHtml = result.stack
+      ? '<div style="margin-top:12px;"><div style="font-weight:700; margin-bottom:8px;">詳細</div><div class="import-result-stack">' + escapeHtml(String(result.stack)) + '</div></div>'
+      : '';
+
+    const cards = [];
+    if (stats.insertedEntries !== undefined) {
+      cards.push('<div class="import-result-card"><div class="import-result-label">新規追加</div><div class="import-result-value ok">' + escapeHtml(String(stats.insertedEntries ?? 0)) + '</div></div>');
+    }
+    if (stats.updatedEntries !== undefined) {
+      cards.push('<div class="import-result-card"><div class="import-result-label">更新</div><div class="import-result-value warn">' + escapeHtml(String(stats.updatedEntries ?? 0)) + '</div></div>');
+    }
+    if (stats.failedRows !== undefined) {
+      cards.push('<div class="import-result-card"><div class="import-result-label">失敗</div><div class="import-result-value error">' + escapeHtml(String(stats.failedRows ?? 0)) + '</div></div>');
+    }
+    if (stats.totalRows !== undefined) {
+      cards.push('<div class="import-result-card"><div class="import-result-label">取込対象行</div><div class="import-result-value">' + escapeHtml(String(stats.totalRows ?? 0)) + '</div></div>');
+    }
+
+    importResultBody.innerHTML = [
+      messageHtml,
+      cards.length > 0 ? '<div class="import-result-grid">' + cards.join('') + '</div>' : '',
+      detailRows ? '<div style="margin-top:12px; overflow:auto; border:1px solid var(--line); border-radius:10px;"><table class="import-result-table"><tbody>' + detailRows + '</tbody></table></div>' : '',
+      stackHtml,
+      rowErrorsHtml
+    ].join('');
+    importResultModal.style.display = 'flex';
+  }
+
   if (rakurakuDiffSelectAll) {
     rakurakuDiffSelectAll.addEventListener('change', () => {
       const checks = document.querySelectorAll('.rakuraku-diff-item-check');
@@ -5070,6 +5240,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   csvHelpModal?.addEventListener('click', (ev) => {
     if (ev.target === csvHelpModal) closeCsvHelp();
   });
+  importResultClose?.addEventListener('click', closeImportResultModal);
+  importResultOk?.addEventListener('click', closeImportResultModal);
+  importResultModal?.addEventListener('click', (ev) => {
+    if (ev.target === importResultModal) closeImportResultModal();
+  });
 
   importCashflowCsvBtn?.addEventListener('click', () => {
     cashflowCsvFileInput?.click();
@@ -5091,29 +5266,51 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       const rawBody = await res.text();
       const payload = safeJsonParse(rawBody) || {};
       if (!res.ok || !payload.ok) {
-        showBanner(
-          statusBanner,
-          'error',
-          buildApiErrorMessage(payload, rawBody, 'CSV取り込みに失敗しました。')
-        );
+        showImportResultModal({
+          title: 'CSV取込み結果',
+          status: 'error',
+          message: buildApiErrorMessage(payload, rawBody, 'CSV取り込みに失敗しました。'),
+          summary: 'CSV取り込みに失敗しました。下記の内容を確認してください。',
+          stats: {
+            httpStatus: res.status,
+            errorCode: payload.errorCode || '',
+            requestId: payload.requestId || ''
+          },
+          stack: payload.stack || rawBody
+        });
         return;
       }
-      if (payload.rowErrors && payload.rowErrors.length > 0) {
-        statusBanner.className = 'banner show warn';
-        statusBanner.innerHTML = '<strong>CSVの取り込み中に一部エラーが発生しました。以下の行はスキップされました：</strong>' +
-          '<ul style="margin:4px 0 0;padding-left:20px;text-align:left;">' +
-          payload.rowErrors.map(err => '<li>[' + err.rowNumber + '行目]: ' + escapeHtml(err.message) + '</li>').join('') +
-          '</ul>';
-      } else {
-        showBanner(
-          statusBanner,
-          'ok',
-          'CSV取込完了: 追加' + String(payload.insertedEntries || 0) + '件 / 更新' + String(payload.updatedEntries || 0) + '件'
-        );
-      }
+      const rowErrors = Array.isArray(payload.rowErrors) ? payload.rowErrors : [];
+      const failedRows = Number(payload.failedRows ?? rowErrors.length ?? 0);
+      const hasPartialFailure = failedRows > 0 || rowErrors.length > 0;
+      showImportResultModal({
+        title: 'CSV取込み結果',
+        status: hasPartialFailure ? 'warn' : 'ok',
+        message: hasPartialFailure
+          ? 'CSV取込みは完了しましたが、一部の行はスキップされました。'
+          : 'CSV取込みが完了しました。',
+        summary: hasPartialFailure
+          ? '件数と行エラーを確認してください。'
+          : '取り込み結果を確認してください。',
+        stats: {
+          totalRows: payload.totalRows ?? '',
+          insertedEntries: payload.insertedEntries ?? 0,
+          updatedEntries: payload.updatedEntries ?? 0,
+          failedRows,
+          invalidRows: payload.invalidRows ?? '',
+          skippedRows: payload.skippedRows ?? ''
+        },
+        rowErrors
+      });
       await loadAll();
     } catch (_) {
-      showBanner(statusBanner, 'error', 'CSV読み込み中にエラーが発生しました。');
+      showImportResultModal({
+        title: 'CSV取込み結果',
+        status: 'error',
+        message: 'CSV読み込み中に通信エラーが発生しました。',
+        summary: '通信エラーのため取込み結果を取得できませんでした。',
+        stats: {}
+      });
     } finally {
       if (importCashflowCsvBtn) {
         importCashflowCsvBtn.disabled = false;
