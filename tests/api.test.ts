@@ -47,6 +47,35 @@ async function createAuthedCookie(
   return `cf_cashflow_session=${token}`;
 }
 
+async function createAuthedCookieWithNullOrganization(
+  email = 'member-null-org@example.com',
+  opts?: { organizationId?: number; role?: 'owner' | 'admin' | 'editor' | 'viewer' | 'member'; isAdmin?: boolean }
+): Promise<string> {
+  const organizationId = opts?.organizationId ?? (await createOrganization());
+  const inserted = await env.DB.prepare(
+    'INSERT INTO users (email, password_hash, password_salt, is_admin) VALUES (?, ?, ?, ?) RETURNING id'
+  )
+    .bind(email, 'hash', 'salt', opts?.isAdmin ? 1 : 0)
+    .first<{ id: number }>();
+
+  const userId = inserted?.id;
+  if (!userId) throw new Error('Failed to create user');
+
+  await env.DB.prepare(
+    'INSERT OR IGNORE INTO organization_members (organization_id, user_id, role) VALUES (?, ?, ?)'
+  )
+    .bind(organizationId, userId, opts?.role ?? 'member')
+    .run();
+
+  const token = crypto.randomUUID().replaceAll('-', '');
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.prepare('INSERT INTO sessions (user_id, token, expires_at) VALUES (?, ?, ?)')
+    .bind(userId, token, expiresAt)
+    .run();
+
+  return `cf_cashflow_session=${token}`;
+}
+
 async function createEntry(cookie: string, payload: {
   title: string;
   amount: number;
@@ -199,6 +228,26 @@ describe('entries api', () => {
 
     const payload = await listRes.json<{ entries: Array<{ title: string }> }>();
     expect(payload.entries.some((entry) => entry.title === 'Org A income')).toBe(false);
+  });
+
+  it('resolves organization from membership when users.organization_id is null', async () => {
+    const orgId = await createOrganization('null-org');
+    const cookie = await createAuthedCookieWithNullOrganization('null-org-user@example.com', { organizationId: orgId, role: 'member' });
+
+    await createEntry(cookie, {
+      title: 'Null org income',
+      amount: 76000,
+      type: 'income',
+      scheduledDate: '2026-06-20'
+    });
+
+    const listRes = await fetchApp('/api/entries?year=2026', {
+      headers: { cookie }
+    });
+    expect(listRes.status).toBe(200);
+
+    const payload = await listRes.json<{ entries: Array<{ title: string }> }>();
+    expect(payload.entries.some((entry) => entry.title === 'Null org income')).toBe(true);
   });
 
   it('bulk updates selected entries (complete/date/actual-date)', async () => {
@@ -504,8 +553,16 @@ describe('session cookie security', () => {
     const password = 'Correct#Pass123';
     const salt = 'salt-cookie';
     const hash = await hashPassword(password, salt);
-    await env.DB.prepare('INSERT INTO users (email, password_hash, password_salt) VALUES (?, ?, ?)')
-      .bind(email, hash, salt)
+    const organizationId = await createOrganization('cookie-sec-org');
+    await env.DB.prepare('INSERT INTO users (organization_id, email, password_hash, password_salt) VALUES (?, ?, ?, ?)')
+      .bind(organizationId, email, hash, salt)
+      .run();
+    const userId = await env.DB.prepare('SELECT id FROM users WHERE email = ?')
+      .bind(email)
+      .first<{ id: number }>();
+    expect(userId?.id).toBeTruthy();
+    await env.DB.prepare('INSERT OR IGNORE INTO organization_members (organization_id, user_id, role) VALUES (?, ?, ?)')
+      .bind(organizationId, userId!.id, 'member')
       .run();
 
     const res = await fetchApp('/login', {

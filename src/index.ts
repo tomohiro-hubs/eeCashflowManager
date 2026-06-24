@@ -36,7 +36,16 @@ const PASSWORD_ALGO_LEGACY = 'sha256_iter120k';
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_BLOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
+const REGISTRATION_ENABLED = true;
 const ENTRY_LABEL_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
+const ENTRY_LABEL_COLOR_LABELS: Record<(typeof ENTRY_LABEL_COLORS)[number], string> = {
+  red: '赤',
+  orange: '橙',
+  yellow: '黄',
+  green: '緑',
+  blue: '青',
+  purple: '紫'
+};
 const CF_CATEGORIES = [
   '',
   '現金売上',
@@ -168,6 +177,51 @@ function requireOrganizationContext(c: Context): { user: User; organizationId: n
   return { user, organizationId: Number(user.organizationId) };
 }
 
+function getSessionCookieOptions(c: Context, expires: Date) {
+  const url = new URL(c.req.url);
+  const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  return {
+    httpOnly: true,
+    secure: !isLocalhost,
+    sameSite: 'Strict' as const,
+    path: '/',
+    expires
+  };
+}
+
+async function resolveUserOrganizationId(db: D1Database, userId: number, preferredOrganizationId: number | null): Promise<number | null> {
+  if (Number.isInteger(preferredOrganizationId) && Number(preferredOrganizationId) > 0) {
+    return Number(preferredOrganizationId);
+  }
+
+  const memberRow = await db.prepare(
+    `SELECT organization_id
+     FROM organization_members
+     WHERE user_id = ?
+     ORDER BY CASE role
+       WHEN 'owner' THEN 0
+       WHEN 'admin' THEN 1
+       WHEN 'editor' THEN 2
+       WHEN 'member' THEN 3
+       WHEN 'viewer' THEN 4
+       ELSE 5
+     END, organization_id ASC
+     LIMIT 1`
+  )
+    .bind(userId)
+    .first<{ organization_id: number }>();
+
+  const organizationId = Number(memberRow?.organization_id ?? 0);
+  if (Number.isInteger(organizationId) && organizationId > 0) {
+    await db.prepare('UPDATE users SET organization_id = ? WHERE id = ? AND organization_id IS NULL')
+      .bind(organizationId, userId)
+      .run();
+    return organizationId;
+  }
+
+  return null;
+}
+
 class CsvImportParseError extends Error {
   code: CsvImportErrorCode;
   constructor(code: CsvImportErrorCode, message: string) {
@@ -178,11 +232,16 @@ class CsvImportParseError extends Error {
 
 app.use('*', async (c, next) => {
   await next();
-  c.header('X-Frame-Options', 'DENY');
+  c.header('Cache-Control', 'no-store');
+  c.header('Pragma', 'no-cache');
+  const pathname = new URL(c.req.url).pathname;
+  const framePolicy = pathname === '/cashflow-statement' ? 'SAMEORIGIN' : 'DENY';
+  const cspFrameAncestors = pathname === '/cashflow-statement' ? "'self'" : "'none'";
+  c.header('X-Frame-Options', framePolicy);
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
   c.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
-  c.header('Content-Security-Policy', "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'");
+  c.header('Content-Security-Policy', `default-src 'self'; base-uri 'self'; frame-ancestors ${cspFrameAncestors}; form-action 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'`);
 });
 
 app.use('*', async (c, next) => {
@@ -202,7 +261,12 @@ app.use('*', async (c, next) => {
     .bind(token, nowIso)
     .first<{ id: number; email: string; is_admin: number; organization_id: number | null; expires_at: string }>();
 
-  c.set('user', row ? { id: row.id, email: row.email, isAdmin: Number(row.is_admin) === 1, organizationId: row.organization_id } : null);
+  if (row) {
+    const organizationId = await resolveUserOrganizationId(c.env.DB, row.id, row.organization_id);
+    c.set('user', { id: row.id, email: row.email, isAdmin: Number(row.is_admin) === 1, organizationId });
+  } else {
+    c.set('user', null);
+  }
 
   // Sliding expiration: extend only when session is close enough to expiry.
   if (row) {
@@ -211,13 +275,7 @@ app.use('*', async (c, next) => {
     if (Number.isFinite(expiresMs) && expiresMs - nowMs <= SESSION_REFRESH_WINDOW_MS) {
       const nextExpires = new Date(nowMs + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
       await c.env.DB.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?').bind(nextExpires, token).run();
-      setCookie(c, SESSION_COOKIE, token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'Strict',
-        path: '/',
-        expires: new Date(nextExpires)
-      });
+      setCookie(c, SESSION_COOKIE, token, getSessionCookieOptions(c, new Date(nextExpires)));
     }
   }
 
@@ -260,10 +318,64 @@ app.get('/', (c) => {
 
 app.get('/login', (c) => c.html(renderAuthPage('login')));
 app.get('/login/', (c) => c.redirect('/login'));
-app.get('/register', (c) => c.redirect('/login'));
+app.get('/register', (c) => {
+  if (!REGISTRATION_ENABLED) return c.redirect('/login');
+  return c.html(renderAuthPage('register'));
+});
 
 app.post('/register', async (c) => {
-  return c.html(renderAuthPage('login', '新規アカウント作成は現在停止しています。'), 403);
+  if (!REGISTRATION_ENABLED) {
+    return c.html(renderAuthPage('login', '新規アカウント作成は現在停止しています。'), 403);
+  }
+
+  const form = await c.req.parseBody();
+  const email = normalizeEmail(String(form.email ?? ''));
+  const password = String(form.password ?? '');
+  const passwordConfirm = String(form.passwordConfirm ?? '');
+
+  if (!email || !password || !passwordConfirm) {
+    return c.html(renderAuthPage('register', 'すべての項目を入力してください。'), 400);
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return c.html(renderAuthPage('register', 'メールアドレスの形式が正しくありません。'), 400);
+  }
+  if (password !== passwordConfirm) {
+    return c.html(renderAuthPage('register', 'パスワードが一致しません。'), 400);
+  }
+  if (!isStrongPassword(password)) {
+    return c.html(renderAuthPage('register', 'パスワードは10文字以上で、大文字・小文字・数字・記号を含めてください。'), 400);
+  }
+
+  const existingUser = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
+    .bind(email)
+    .first<{ id: number }>();
+  if (existingUser) {
+    return c.html(renderAuthPage('register', 'このメールアドレスは既に登録されています。'), 409);
+  }
+
+  const salt = randomToken(16);
+  const passwordHash = await hashPasswordPbkdf2(password, salt);
+
+  await c.env.DB.prepare(
+    `INSERT OR IGNORE INTO organizations (id, name, created_at)
+     VALUES (1, 'Default Organization', datetime('now'))`
+  ).run();
+  await c.env.DB.prepare(
+    `INSERT INTO users (email, password_hash, password_salt, password_algo, organization_id, created_at)
+     VALUES (?, ?, ?, ?, 1, datetime('now'))`
+  ).bind(email, passwordHash, salt, PASSWORD_ALGO_PBKDF2).run();
+
+  const createdUser = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
+    .bind(email)
+    .first<{ id: number }>();
+  if (createdUser) {
+    await c.env.DB.prepare(
+      `INSERT OR IGNORE INTO organization_members (organization_id, user_id, role, created_at)
+       VALUES (1, ?, 'member', datetime('now'))`
+    ).bind(createdUser.id).run();
+  }
+
+  return c.html(renderAuthPage('login', 'アカウントを作成しました。メールアドレスとパスワードでログインしてください。'));
 });
 
 app.post('/login', async (c) => {
@@ -310,6 +422,12 @@ app.post('/login', async (c) => {
     }
   }
 
+  const organizationId = await resolveUserOrganizationId(c.env.DB, user.id, null);
+  if (!organizationId) {
+    await recordLoginFailure(c.env.DB, loginRateLimitKey);
+    return c.html(renderAuthPage('login', 'このアカウントには利用可能な所属組織がありません。管理者に確認してください。'), 403);
+  }
+
   const token = randomToken(32);
   const expires = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
@@ -320,13 +438,7 @@ app.post('/login', async (c) => {
     'INSERT INTO user_session_logs (user_id, session_token, login_at) VALUES (?, ?, datetime(\'now\'))'
   ).bind(user.id, token).run();
 
-  setCookie(c, SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Strict',
-    path: '/',
-    expires: new Date(expires)
-  });
+  setCookie(c, SESSION_COOKIE, token, getSessionCookieOptions(c, new Date(expires)));
 
   return c.redirect('/app');
 });
@@ -376,7 +488,9 @@ app.post('/reset-password', async (c) => {
 app.get('/app', async (c) => {
   const user = c.get('user');
   if (!user) return c.redirect('/login');
-  return c.html(renderAppPage(user.email, user.isAdmin));
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  return c.html(renderAppPage(user.email, user.isAdmin, auth.organizationId));
 });
 
 app.get('/fiscal', async (c) => {
@@ -390,8 +504,9 @@ app.get('/cashflow-statement', async (c) => {
   if (!user) return c.redirect('/login');
   const auth = requireOrganizationContext(c);
   if (auth instanceof Response) return auth;
+  const embedded = String(c.req.query('embedded') ?? '') === '1';
   const cashflowStatementData = await loadCashflowStatementData(c.env.DB, auth.organizationId, 2026, 2031);
-  return c.html(renderCashflowStatementPage(user.email, user.isAdmin, cashflowStatementData));
+  return c.html(renderCashflowStatementPage(user.email, user.isAdmin, cashflowStatementData, { embedded }));
 });
 
 app.get('/audit', async (c) => {
@@ -2068,7 +2183,13 @@ function renderAuthPage(mode: 'login' | 'register' | 'forgot' | 'reset', error?:
   const title = isLogin ? 'ログイン' : isRegister ? '新規登録' : isForgot ? 'パスワード再設定' : '新しいパスワード設定';
   const action = isLogin || isRegister ? `/${mode}` : isForgot ? '/forgot-password' : '/reset-password';
   const submitLabel = isLogin ? 'ログイン' : isRegister ? 'アカウント作成' : isForgot ? '再設定メールを送信' : 'パスワードを更新';
-  const helper = 'ログイン情報は管理者から案内されたアカウントをご利用ください。';
+  const helper = isLogin
+    ? (REGISTRATION_ENABLED
+      ? '一時的に新規登録を有効にしています。アカウントがない場合は /register から作成してください。'
+      : 'ログイン情報は管理者から案内されたアカウントをご利用ください。')
+    : isRegister
+      ? '登録後はこのメールアドレスとパスワードでログインできます。'
+      : 'ログイン情報は管理者から案内されたアカウントをご利用ください。';
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -2097,16 +2218,18 @@ function renderAuthPage(mode: 'login' | 'register' | 'forgot' | 'reset', error?:
       <label>メールアドレス</label>
       <input type="email" name="email" required />
       ${(isLogin || isRegister || isReset) ? '<label>パスワード</label><input type="password" name="password" minlength="8" required />' : ''}
+      ${isRegister ? '<label>パスワード（確認）</label><input type="password" name="passwordConfirm" minlength="8" required />' : ''}
       ${isReset ? '<label>新しいパスワード（確認）</label><input type="password" name="passwordConfirm" minlength="8" required />' : ''}
       <button type="submit">${submitLabel}</button>
     </form>
+    ${isLogin && REGISTRATION_ENABLED ? '<p><a href="/register">新規登録はこちら</a></p>' : ''}
     <p>${helper}</p>
   </main>
 </body>
 </html>`;
 }
 
-function renderAppPage(email: string, isAdmin: boolean) {
+function renderAppPage(email: string, isAdmin: boolean, organizationId: number) {
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -2150,6 +2273,10 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .header-warning-slot { max-width: 1800px; margin: 8px auto 0; padding: 0 20px; min-height: 34px; }
     .balance-alert { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease, transform .15s ease; font-size: 12px; font-weight: 700; color: #7a5300; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 8px 10px; pointer-events: none; }
     .balance-alert.show { opacity: 1; transform: translateY(0); }
+    .debug-panel { max-width: 1800px; margin: 8px auto 0; padding: 0 20px; }
+    .debug-panel-inner { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border: 1px dashed #b9c8d9; border-radius: 10px; background: #f8fbff; color: #334e68; font-size: 12px; }
+    .debug-panel strong { display: block; font-size: 11px; color: #5b7087; margin-bottom: 3px; }
+    .debug-panel code { font-size: 12px; word-break: break-all; }
 
     .main { max-width: 1800px; margin: 18px auto; padding: 0 20px 40px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 0 rgba(15, 47, 74, 0.04); }
@@ -2161,7 +2288,35 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
     .row { display: grid; gap: 10px; grid-template-columns: 1.5fr 1fr 1fr 1fr 1.1fr 1.5fr auto; }
+    .workspace.is-edit-mode #entry-form.row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 10px;
+      align-items: flex-start;
+    }
     .field { min-width: 0; }
+    .field > input,
+    .field > select {
+      width: 100%;
+      min-width: 0;
+    }
+    .workspace.is-edit-mode .field { flex: 1 1 220px; }
+    .workspace.is-edit-mode .field[data-form-field="title"] { flex-basis: 280px; }
+    .workspace.is-edit-mode .field[data-form-field="amount"] { flex-basis: 150px; }
+    .workspace.is-edit-mode .field[data-form-field="type"] { flex-basis: 140px; }
+    .workspace.is-edit-mode .field[data-form-field="labelColor"] { flex-basis: 140px; }
+    .workspace.is-edit-mode .field[data-form-field="scheduledDate"] { flex-basis: 180px; }
+    .workspace.is-edit-mode .field[data-form-field="note"] { flex-basis: 260px; }
+    .workspace.is-edit-mode .field[data-form-field="cfCategory"] { flex-basis: 300px; }
+    .workspace.is-edit-mode .field[data-form-field="customerName"] { flex-basis: 220px; }
+    .workspace.is-edit-mode .field[data-form-field="staffName"] { flex-basis: 220px; }
+    .workspace.is-edit-mode .field[data-form-field="submit"] {
+      flex: 0 0 120px;
+      align-self: end;
+    }
+    .workspace.is-edit-mode .field[data-form-field="submit"] .field-hint {
+      text-align: center;
+    }
     .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
     input, select, button { border-radius: 8px; border: 1px solid #b9c8d9; padding: 9px 10px; font-size: 14px; background: #fff; color: var(--text); }
     input:focus, select:focus, button:focus { outline: 2px solid rgba(15,76,129,.2); outline-offset: 1px; border-color: var(--accent); }
@@ -2227,11 +2382,109 @@ function renderAppPage(email: string, isAdmin: boolean) {
     .label-green { background: #22c55e; }
     .label-blue { background: #3b82f6; }
     .label-purple { background: #a855f7; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+    .workspace.is-edit-mode { grid-template-columns: minmax(0, 1.08fr) minmax(460px, .92fr); align-items: start; }
+    .workspace-left { min-width: 0; }
+    .workspace-right { display: none; min-width: 0; align-self: start; }
+    .workspace.is-edit-mode .workspace-right { display: block; position: sticky; top: 18px; }
+    .edit-mode-bar {
+      display: none;
+      position: sticky;
+      top: 86px;
+      z-index: 18;
+      margin: 0 0 14px;
+      padding: 12px 14px;
+      border: 1px solid #d4dde7;
+      border-radius: 12px;
+      background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+      box-shadow: 0 4px 16px rgba(10, 36, 64, 0.06);
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .workspace.is-edit-mode .edit-mode-bar { display: flex; }
+    .edit-mode-bar strong { font-size: 13px; color: #23384e; }
+    .edit-mode-bar .muted { font-size: 12px; }
+    .edit-mode-bar button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 180px;
+      padding: 11px 14px;
+      border-radius: 10px;
+      border: 1px solid #7aa0c7;
+      background: #0f4c81;
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+      pointer-events: auto;
+      position: relative;
+      z-index: 19;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .edit-mode-bar button[aria-pressed="true"] { background: #0b3558; border-color: #0b3558; }
+    .workspace-right-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      height: calc(100vh - 36px);
+      max-height: calc(100vh - 36px);
+      overflow: hidden;
+      min-height: 0;
+      align-self: start;
+    }
+    .workspace-right-frame-stack {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .workspace-right-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .workspace-right-frame {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 1px solid #d4dde7;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 1px 0 rgba(15, 47, 74, 0.04);
+    }
+    .workspace-right-frame.is-hidden {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .workspace-right-note { font-size: 12px; color: var(--muted); }
+    .list-scroll-sync {
+      overflow-x: auto;
+      overflow-y: hidden;
+      height: 14px;
+      margin: 0 0 8px;
+      border: 1px solid #e1e8f0;
+      border-radius: 10px;
+      background: #f8fbff;
+      scrollbar-gutter: stable both-edges;
+    }
+    .list-scroll-sync-spacer {
+      height: 1px;
+      width: 0;
+    }
 
     @media (max-width: 1000px) {
       .head-wrap { grid-template-columns: 1fr; }
       .summary { grid-template-columns: repeat(3, minmax(100px, 1fr)); }
       .row { grid-template-columns: 1fr 1fr; }
+      .workspace.is-edit-mode { grid-template-columns: 1fr; }
+      .workspace-right-panel { position: static; height: auto; max-height: none; overflow: visible; }
+      .workspace-right-frame { min-height: 560px; height: 560px; }
+      .list-scroll-sync { position: static; }
     }
     @media (max-width: 560px) {
       .summary { grid-template-columns: 1fr; }
@@ -2355,6 +2608,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
       <a href="/cashflow-statement" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">資金繰り表</a>
+      <button id="edit-mode-toggle" type="button" class="secondary" style="display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; min-width:110px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; background:rgba(255,255,255,.12); font-size:13px; cursor:pointer; position:relative; z-index:30; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent;">編集モード</button>
       <a href="/fiscal" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">年間サマリー</a>
       ${isAdmin ? '<a href="/admin/backups" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">バックアップ</a>' : ''}
       ${isAdmin ? '<a href="/audit" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">監査ログ</a>' : ''}
@@ -2368,31 +2622,47 @@ function renderAppPage(email: string, isAdmin: boolean) {
 <div class="header-warning-slot">
   <div id="balance-alert" class="balance-alert">警告: 今月の差引がマイナスです。資金繰りを確認してください。</div>
 </div>
+<div class="debug-panel" aria-live="polite">
+  <div class="debug-panel-inner">
+    <div><strong>Debug org</strong><code id="debug-org-id">${escapeHtml(String(organizationId))}</code></div>
+    <div><strong>Debug summary</strong><code id="debug-summary">loading...</code></div>
+    <div><strong>Debug entries</strong><code id="debug-entries">loading...</code></div>
+  </div>
+</div>
 
-<main class="main">
-  <section class="panel">
-    <div id="status-banner" class="banner" role="status"></div>
-    <div class="topline">
-      <strong>年次フィルター</strong>
-      <div class="muted">表示・入力対象の年を切り替えます</div>
+  <main class="main">
+    <div id="workspace" class="workspace">
+    <div class="workspace-left">
+    <div id="edit-mode-bar" class="edit-mode-bar" aria-label="編集モード操作">
+      <div>
+        <strong>編集モード</strong>
+        <div class="muted">左の予定一覧でCF区分を調整すると、右の資金繰り表が更新されます。</div>
+      </div>
+      <button id="edit-mode-toggle-inline" type="button" aria-pressed="false">編集モードを開始</button>
     </div>
+    <section class="panel">
+      <div id="status-banner" class="banner" role="status"></div>
+      <div class="topline">
+        <strong>年次フィルター</strong>
+        <div class="muted">表示・入力対象の年を切り替えます</div>
+      </div>
     <div class="toolbar">
       <select id="year"></select>
       <span id="month-caption" class="muted"></span>
     </div>
   </section>
 
-  <section class="panel">
-    <div class="topline">
-      <strong>資金繰り表</strong>
-      <span class="muted">Excelの資金繰り表をWebで確認できるページです。今後この表に仕分け区分ごとの集計を接続します。</span>
-    </div>
+    <section class="panel">
+      <div class="topline">
+        <strong>資金繰り表</strong>
+        <span class="muted">Excelの資金繰り表をWebで確認できるページです。今後この表に仕分け区分ごとの集計を接続します。</span>
+      </div>
     <div class="toolbar">
       <a href="/cashflow-statement" class="primary" style="display:inline-block; padding:9px 12px; text-decoration:none;">資金繰り表ページを開く</a>
     </div>
   </section>
 
-  <section class="panel">
+    <section class="panel">
     <div class="topline">
       <strong>年間入出金データ（明細）</strong>
       <span class="muted">選択中の年の完了済み入出金データを表示します。残高は0起点で計算します。</span>
@@ -2416,22 +2686,22 @@ function renderAppPage(email: string, isAdmin: boolean) {
       <button id="import-rakuraku-csv" type="button">楽楽販売CSV読込</button>
     </div>
     <form id="entry-form" class="row" novalidate>
-      <div class="field">
+      <div class="field" data-form-field="title">
         <label for="f-title">件名</label>
         <input id="f-title" name="title" placeholder="例: A社売上入金" required maxlength="80" />
         <div class="field-hint" data-hint-for="title">1-80文字</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="amount">
         <label for="f-amount">金額</label>
         <input id="f-amount" name="amount" type="number" step="1" min="1" placeholder="例: 120000" required />
         <div class="field-hint" data-hint-for="amount">1円以上の整数</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="type">
         <label for="f-type">区分</label>
         <select id="f-type" name="type"><option value="income">入金</option><option value="expense">出金</option></select>
         <div class="field-hint" data-hint-for="type">入金 / 出金</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="labelColor">
         <label for="f-label-color">色ラベル</label>
         <select id="f-label-color" name="labelColor">
           <option value="red">赤</option>
@@ -2443,34 +2713,34 @@ function renderAppPage(email: string, isAdmin: boolean) {
         </select>
         <div class="field-hint" data-hint-for="labelColor">6色から選択</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="scheduledDate">
         <label for="f-date">予定日</label>
         <input id="f-date" name="scheduledDate" type="date" required />
         <div class="field-hint" data-hint-for="scheduledDate">選択中の年月に合わせて入力</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="note">
         <label for="f-note">メモ</label>
         <input id="f-note" name="note" placeholder="任意" maxlength="140" />
         <div class="field-hint" data-hint-for="note">0-140文字</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="cfCategory">
         <label for="f-cf-category">CF区分</label>
         <select id="f-cf-category" name="cfCategory">
           ${renderCfCategoryOptions('', 'income')}
         </select>
         <div class="field-hint" data-hint-for="cfCategory">未設定可。後から一覧で修正できます</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="customerName">
         <label for="f-customer-name">顧客名</label>
         <input id="f-customer-name" name="customerName" placeholder="任意" maxlength="80" />
         <div class="field-hint" data-hint-for="customerName">0-80文字</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="staffName">
         <label for="f-staff-name">担当社員名</label>
         <input id="f-staff-name" name="staffName" placeholder="任意" maxlength="80" />
         <div class="field-hint" data-hint-for="staffName">0-80文字</div>
       </div>
-      <div class="field">
+      <div class="field" data-form-field="submit">
         <label>&nbsp;</label>
         <button id="submit-btn" class="primary" type="submit">追加</button>
         <div class="field-hint">Enter で追加</div>
@@ -2513,9 +2783,10 @@ function renderAppPage(email: string, isAdmin: boolean) {
       </select>
       <button id="list-filter-reset" type="button">絞り込み解除</button>
       <button id="export-csv" class="secondary" type="button">CSV出力</button>
+      <button id="download-master-csv" class="secondary" type="button">マスターダウンロード</button>
       <input id="cashflow-csv-file" type="file" accept=".csv,text/csv" style="display:none" />
       <button id="import-cashflow-csv" class="secondary" type="button">CSV入力</button>
-      <button id="csv-help-trigger" class="help-icon" type="button" title="CSV入力規則を表示">ⓘ</button>
+      <button id="csv-help-trigger" class="help-icon" type="button" title="CSV入力規則とCF区分の説明を表示">ⓘ</button>
       <span id="list-filter-caption" class="muted"></span>
     </div>
     <div class="column-toolbar" aria-label="予定一覧の列表示切り替え">
@@ -2542,14 +2813,33 @@ function renderAppPage(email: string, isAdmin: boolean) {
       <button id="bulk-uncomplete" type="button">一括で未完了</button>
       <span id="bulk-selection-caption" class="muted">選択 0 件</span>
     </div>
+    <div id="list-scroll-sync" class="list-scroll-sync" aria-label="予定一覧の横スクロール">
+      <div id="list-scroll-sync-spacer" class="list-scroll-sync-spacer"></div>
+    </div>
     <div id="list-section-body" class="table-wrap">
       <table>
         <thead><tr><th data-list-col="toggle"></th><th data-list-col="index">#</th><th data-list-col="label">ラベル</th><th data-list-col="scheduled_date">予定日</th><th data-list-col="type">区分</th><th data-list-col="cf_category">CF区分</th><th data-list-col="title">件名</th><th data-list-col="amount">金額</th><th data-list-col="note">メモ</th><th data-list-col="actual_date">入出金日</th><th data-list-col="customer_name">顧客名</th><th data-list-col="staff_name">担当</th><th data-list-col="running">残高</th><th data-list-col="actions">操作</th><th data-list-col="select">選択</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
-  </section>
-</main>
+    </section>
+  </div>
+  <aside id="workspace-right" class="workspace-right" aria-label="資金繰り表編集モード">
+    <div class="workspace-right-panel">
+      <div class="workspace-right-head">
+        <div>
+          <strong>資金繰り表</strong>
+          <div class="workspace-right-note">CF区分の変更後にこの表を即時再読み込みします。</div>
+        </div>
+      </div>
+      <div class="workspace-right-frame-stack">
+        <iframe id="statement-frame" class="workspace-right-frame" title="資金繰り表編集ビュー" loading="eager" src="/cashflow-statement?embedded=1" data-src="/cashflow-statement?embedded=1"></iframe>
+        <iframe id="statement-frame-buffer" class="workspace-right-frame is-hidden" title="資金繰り表編集ビュー（読み込み用）" loading="eager" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
+      </div>
+    </div>
+  </aside>
+  </div>
+  </main>
 
 <div id="csv-help-modal" class="modal-overlay">
   <div class="modal-box">
@@ -2639,6 +2929,17 @@ function renderAppPage(email: string, isAdmin: boolean) {
     <div style="margin-top:16px; text-align:right;">
       <button id="csv-help-ok" type="button" class="primary" style="padding:8px 20px; font-size:13px; cursor:pointer;">閉じる</button>
     </div>
+    <div style="margin-top:18px; padding-top:16px; border-top:1px solid var(--line);">
+      <h3 style="margin:0 0 8px; font-size:16px;">CF区分の設定について</h3>
+      <p style="font-size:13px; color:var(--muted); margin:0 0 10px;">
+        CF区分は、予定一覧の明細を資金繰り表へ反映するための分類です。編集モードでは、予定一覧の各行でCF区分を変更すると、右側の資金繰り表が再計算されます。
+      </p>
+      <ul style="margin:0; padding-left:18px; color:var(--text); font-size:13px; line-height:1.7;">
+        <li>入金系は <code>現金売上</code>、<code>売掛金回収</code> などの入金区分を選びます。</li>
+        <li>出金系は <code>現金仕入</code>、<code>人件費支出</code>、<code>銀行借入返済</code> などの出金区分を選びます。</li>
+        <li><code>未設定</code> のままだと資金繰り表の集計対象になりません。</li>
+      </ul>
+    </div>
   </div>
 </div>
 
@@ -2699,6 +3000,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const importRakurakuCsvBtn = document.getElementById('import-rakuraku-csv');
   const cashflowCsvFileInput = document.getElementById('cashflow-csv-file');
   const importCashflowCsvBtn = document.getElementById('import-cashflow-csv');
+  const downloadMasterCsvBtn = document.getElementById('download-master-csv');
   const csvHelpTrigger = document.getElementById('csv-help-trigger');
   const csvHelpModal = document.getElementById('csv-help-modal');
   const csvHelpClose = document.getElementById('csv-help-close');
@@ -2713,6 +3015,16 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const toggleAnnualBtn = document.getElementById('toggle-annual');
   const toggleListBtn = document.getElementById('toggle-list');
   const sortByDateBtn = document.getElementById('sort-by-date');
+  const editModeToggleBtn = document.getElementById('edit-mode-toggle');
+  const editModeToggleInlineBtn = document.getElementById('edit-mode-toggle-inline');
+  const workspaceEl = document.getElementById('workspace');
+  const editModeBarEl = document.getElementById('edit-mode-bar');
+  const statementFrameEl = document.getElementById('statement-frame');
+  const statementFrameBufferEl = document.getElementById('statement-frame-buffer');
+  const debugSummaryEl = document.getElementById('debug-summary');
+  const debugEntriesEl = document.getElementById('debug-entries');
+  const listScrollSyncEl = document.getElementById('list-scroll-sync');
+  const listScrollSyncSpacerEl = document.getElementById('list-scroll-sync-spacer');
   const annualSectionBody = document.getElementById('annual-section-body');
   const listSectionBody = document.getElementById('list-section-body');
   const listFilterKeywordEl = document.getElementById('list-filter-keyword');
@@ -2733,6 +3045,34 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const bulkUncompleteBtn = document.getElementById('bulk-uncomplete');
   const bulkSelectionCaptionEl = document.getElementById('bulk-selection-caption');
 
+  const MASTER_CF_CATEGORIES = ${JSON.stringify([
+    { key: '', label: '未設定', kind: 'cf_category', target: 'all', description: '未分類の明細', sortOrder: 0 },
+    ...CF_INCOME_CATEGORIES.map((label, index) => ({
+      key: label,
+      label,
+      kind: 'cf_category',
+      target: 'income',
+      description: '入金のCF区分',
+      sortOrder: index + 1
+    })),
+    ...CF_EXPENSE_CATEGORIES.map((label, index) => ({
+      key: label,
+      label,
+      kind: 'cf_category',
+      target: 'expense',
+      description: '出金のCF区分',
+      sortOrder: CF_INCOME_CATEGORIES.length + index + 1
+    }))
+  ])};
+  const MASTER_LABEL_COLORS = ${JSON.stringify(ENTRY_LABEL_COLORS.map((key, index) => ({
+    key,
+    label: ENTRY_LABEL_COLOR_LABELS[key],
+    kind: 'label_color',
+    target: 'all',
+    description: '予定一覧の色ラベル',
+    sortOrder: index + 1
+  })))};
+
   const fmt = new Intl.NumberFormat('ja-JP');
   let entries = [];
   let savingReorder = false;
@@ -2740,12 +3080,38 @@ function renderAppPage(email: string, isAdmin: boolean) {
   const selectedEntryIds = new Set();
   const expandedMgmtIds = new Set();
   let lastCheckedVisibleIndex = -1;
+  let isEditMode = false;
+  let editModeHiddenColumnSnapshot = null;
+  let isSyncingListScroll = false;
+  let visibleStatementFrameEl = statementFrameEl;
+  let hiddenStatementFrameEl = statementFrameBufferEl;
+  let statementFrameRefreshSeq = 0;
+  let latestStatementFrameRefreshSeq = 0;
+  const LIST_COLUMN_STORAGE_KEY = 'cashflow-list-hidden-columns-v1';
+  const LIST_COLUMN_HIDE_PRESET = ['label', 'cf_category', 'note', 'actual_date', 'customer_name', 'staff_name', 'running', 'actions'];
+  const LIST_COLUMN_LABELS = new Map([
+    ['label', 'ラベル'],
+    ['cf_category', 'CF区分'],
+    ['note', 'メモ'],
+    ['actual_date', '入出金日'],
+    ['customer_name', '顧客名'],
+    ['staff_name', '担当'],
+    ['running', '残高'],
+    ['actions', '操作']
+  ]);
+  let hiddenListColumns = loadHiddenListColumns();
 
   const now = new Date();
   initPeriodSelectors(now);
   syncFormDateWithMonth();
   syncEntryCfCategoryOptions();
   setMonthCaption();
+  restoreEditMode();
+  if (isEditMode) showEditModeColumns();
+  syncEditModeUi();
+  if (isEditMode) refreshStatementFrame();
+  syncListScrollWidth();
+  syncListScrollPositionFromTable();
 
   function initPeriodSelectors(d) {
     const y = d.getFullYear();
@@ -2794,6 +3160,141 @@ function renderAppPage(email: string, isAdmin: boolean) {
     monthCaption.textContent = yearInput.value + '年の予定を表示中';
   }
 
+  function loadEditModePreference() {
+    try {
+      return localStorage.getItem('cashflow-edit-mode-v1') === '1';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function saveEditModePreference(nextValue) {
+    try {
+      localStorage.setItem('cashflow-edit-mode-v1', nextValue ? '1' : '0');
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function restoreEditMode() {
+    isEditMode = loadEditModePreference();
+  }
+
+  function syncEditModeUi() {
+    if (workspaceEl instanceof HTMLElement) {
+      workspaceEl.classList.toggle('is-edit-mode', isEditMode);
+    }
+    if (editModeBarEl instanceof HTMLElement) {
+      editModeBarEl.setAttribute('aria-hidden', isEditMode ? 'false' : 'true');
+    }
+    if (editModeToggleBtn instanceof HTMLButtonElement) {
+      editModeToggleBtn.textContent = isEditMode ? '編集モード終了' : '編集モード';
+      editModeToggleBtn.setAttribute('aria-pressed', isEditMode ? 'true' : 'false');
+    }
+    if (editModeToggleInlineBtn instanceof HTMLButtonElement) {
+      editModeToggleInlineBtn.textContent = isEditMode ? '編集モードを終了' : '編集モードを開始';
+      editModeToggleInlineBtn.setAttribute('aria-pressed', isEditMode ? 'true' : 'false');
+    }
+    if (visibleStatementFrameEl instanceof HTMLIFrameElement) {
+      visibleStatementFrameEl.style.visibility = isEditMode ? 'visible' : 'hidden';
+    }
+    if (hiddenStatementFrameEl instanceof HTMLIFrameElement) {
+      hiddenStatementFrameEl.style.visibility = 'hidden';
+    }
+  }
+
+  function syncListScrollWidth() {
+    if (!(listSectionBody instanceof HTMLElement) || !(listScrollSyncSpacerEl instanceof HTMLElement)) return;
+    const width = Math.max(listSectionBody.scrollWidth, listSectionBody.clientWidth);
+    listScrollSyncSpacerEl.style.width = width + 'px';
+  }
+
+  function syncListScrollPositionFromTable() {
+    if (!(listSectionBody instanceof HTMLElement) || !(listScrollSyncEl instanceof HTMLElement)) return;
+    if (isSyncingListScroll) return;
+    isSyncingListScroll = true;
+    listScrollSyncEl.scrollLeft = listSectionBody.scrollLeft;
+    isSyncingListScroll = false;
+  }
+
+  function syncTableScrollPositionFromTop() {
+    if (!(listSectionBody instanceof HTMLElement) || !(listScrollSyncEl instanceof HTMLElement)) return;
+    if (isSyncingListScroll) return;
+    isSyncingListScroll = true;
+    listSectionBody.scrollLeft = listScrollSyncEl.scrollLeft;
+    isSyncingListScroll = false;
+  }
+
+  function refreshStatementFrame() {
+    if (!isEditMode || !(visibleStatementFrameEl instanceof HTMLIFrameElement) || !(hiddenStatementFrameEl instanceof HTMLIFrameElement)) return;
+    const refreshSeq = ++statementFrameRefreshSeq;
+    latestStatementFrameRefreshSeq = refreshSeq;
+    const baseUrl = String(visibleStatementFrameEl.dataset.src || '/cashflow-statement?embedded=1');
+    const nextUrl = baseUrl + '&t=' + Date.now();
+    const nextVisibleFrame = hiddenStatementFrameEl;
+    nextVisibleFrame.classList.add('is-hidden');
+    nextVisibleFrame.style.visibility = 'hidden';
+    nextVisibleFrame.addEventListener('load', function handleLoad() {
+      nextVisibleFrame.removeEventListener('load', handleLoad);
+      if (!isEditMode || refreshSeq !== latestStatementFrameRefreshSeq) return;
+      if (visibleStatementFrameEl instanceof HTMLIFrameElement) {
+        visibleStatementFrameEl.style.visibility = 'hidden';
+      }
+      nextVisibleFrame.classList.remove('is-hidden');
+      nextVisibleFrame.style.visibility = 'visible';
+      const previousVisible = visibleStatementFrameEl;
+      visibleStatementFrameEl = nextVisibleFrame;
+      hiddenStatementFrameEl = previousVisible;
+      if (hiddenStatementFrameEl instanceof HTMLIFrameElement) {
+        hiddenStatementFrameEl.classList.add('is-hidden');
+        hiddenStatementFrameEl.style.visibility = 'hidden';
+      }
+    }, { once: true });
+    nextVisibleFrame.src = nextUrl;
+  }
+
+  function showEditModeColumns() {
+    editModeHiddenColumnSnapshot = new Set(hiddenListColumns);
+    if (hiddenListColumns.has('cf_category')) {
+      hiddenListColumns.delete('cf_category');
+      saveHiddenListColumns();
+      syncListColumnToggleUi();
+      applyListColumnVisibility();
+    }
+  }
+
+  function restoreEditModeColumns() {
+    if (!editModeHiddenColumnSnapshot) return;
+    hiddenListColumns = new Set(editModeHiddenColumnSnapshot);
+    editModeHiddenColumnSnapshot = null;
+    saveHiddenListColumns();
+    syncListColumnToggleUi();
+    applyListColumnVisibility();
+  }
+
+  function toggleEditMode() {
+    isEditMode = !isEditMode;
+    if (isEditMode) {
+      showEditModeColumns();
+      refreshStatementFrame();
+    } else {
+      latestStatementFrameRefreshSeq = ++statementFrameRefreshSeq;
+      restoreEditModeColumns();
+    }
+    saveEditModePreference(isEditMode);
+    syncEditModeUi();
+  }
+
+  window.__toggleEditMode = toggleEditMode;
+  editModeToggleBtn?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    toggleEditMode();
+  });
+  editModeToggleInlineBtn?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    toggleEditMode();
+  });
+
   function syncFormDateWithMonth() {
     const dateInput = form.elements.scheduledDate;
     if (!dateInput) return;
@@ -2826,20 +3327,6 @@ function renderAppPage(email: string, isAdmin: boolean) {
     entryCfCategoryEl.innerHTML = buildEntryCfCategoryOptionsHtml(nextSelected, type);
     entryCfCategoryEl.value = nextSelected;
   }
-
-  const LIST_COLUMN_STORAGE_KEY = 'cashflow-list-hidden-columns-v1';
-  const LIST_COLUMN_HIDE_PRESET = ['label', 'cf_category', 'note', 'actual_date', 'customer_name', 'staff_name', 'running', 'actions'];
-  const LIST_COLUMN_LABELS = new Map([
-    ['label', 'ラベル'],
-    ['cf_category', 'CF区分'],
-    ['note', 'メモ'],
-    ['actual_date', '入出金日'],
-    ['customer_name', '顧客名'],
-    ['staff_name', '担当'],
-    ['running', '残高'],
-    ['actions', '操作']
-  ]);
-  let hiddenListColumns = loadHiddenListColumns();
 
   function loadHiddenListColumns() {
     try {
@@ -2913,6 +3400,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       el.classList.toggle('is-hidden-col', hiddenListColumns.has(key));
     });
     syncListColumnToggleUi();
+    syncListScrollWidth();
   }
 
   function validatePayload(payload) {
@@ -3027,11 +3515,21 @@ function renderAppPage(email: string, isAdmin: boolean) {
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
       syncMonthFilterOptions();
+      if (debugSummaryEl) {
+        debugSummaryEl.textContent = summaryRes.ok
+          ? 'income=' + String(Number(summary.income || 0)) + ' expense=' + String(Number(summary.expense || 0)) + ' balance=' + String(Number(summary.balance || 0))
+          : 'error=' + String(summaryRes.status);
+      }
+      if (debugEntriesEl) {
+        debugEntriesEl.textContent = entriesRes.ok ? 'count=' + String(entries.length) : 'error=' + String(entriesRes.status);
+      }
 
       updateSummary(summary);
       renderRows();
+      syncListScrollPositionFromTable();
       updateSelectedMonthAlert();
       renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
+      if (isEditMode) refreshStatementFrame();
       if (!entriesRes.ok) {
         showBanner(statusBanner, 'error', '一覧データの取得に失敗しました。再読み込みしてください。');
       } else {
@@ -3199,6 +3697,105 @@ function renderAppPage(email: string, isAdmin: boolean) {
     if (bulkSelectionCaptionEl) bulkSelectionCaptionEl.textContent = '選択 ' + String(selectedEntryIds.size) + ' 件';
   }
 
+  function patchEntryInMemory(id, patch) {
+    entries = entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+  }
+
+  function renderEntryRowHtml(e, idx, running, entryRunning) {
+    const amount = Number(e.amount);
+    const runningClass = entryRunning < 0 ? 'minus' : 'plus';
+    const rowClass = Number(e.is_completed) === 1 ? 'completed' : '';
+    const hasMgmt = String(e.import_management_no || '').trim() !== '';
+    const expanded = expandedMgmtIds.has(Number(e.id));
+    const toggleLabel = expanded ? '−' : '+';
+    const toggleButton = hasMgmt
+      ? '<button type="button" class="toggle-mgmt" data-togglemgmt="1" data-id="' + e.id + '">' + toggleLabel + '</button>'
+      : '';
+    const detailRow = hasMgmt && expanded
+      ? '<tr class="detail-row" data-parent-id="' + e.id + '"><td></td><td colspan="14">入出金管理No: ' + escapeHtml(String(e.import_management_no || '')) + '</td></tr>'
+      : '';
+
+    return {
+      rowHtml:
+        '<tr class="' + rowClass + '" data-entry-id="' + e.id + '">' +
+          '<td class="toggle-cell" data-list-col="toggle">' + toggleButton + '</td>' +
+          '<td data-list-col="index">' + (idx + 1) + '</td>' +
+          '<td data-list-col="label">' +
+            '<span class="label-dot label-' + escapeHtml(String(e.label_color || 'blue')) + '"></span>' +
+          '</td>' +
+          '<td data-list-col="scheduled_date">' + escapeHtml(e.scheduled_date) + '</td>' +
+          '<td data-list-col="type">' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
+          '<td data-list-col="cf_category">' + escapeHtml(e.cf_category || '未設定') + '</td>' +
+          '<td data-list-col="title">' + escapeHtml(e.title) + '</td>' +
+          '<td class="amount ' + e.type + '" data-list-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
+          '<td data-list-col="note">' + escapeHtml(e.note || '') + '</td>' +
+          '<td data-list-col="actual_date">' + escapeHtml(e.actual_transaction_date || '') + '</td>' +
+          '<td data-list-col="customer_name">' + escapeHtml(e.customer_name || '') + '</td>' +
+          '<td data-list-col="staff_name">' + escapeHtml(e.staff_name || '') + '</td>' +
+          '<td class="running ' + runningClass + '" data-list-col="running">' + (entryRunning > 0 ? '+' : '') + fmt.format(entryRunning) + '</td>' +
+          '<td class="actions" data-list-col="actions">' +
+            '<div class="action-row">' +
+              '<button type="button" data-move="top" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>先頭</button>' +
+              '<button type="button" data-move="up" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>上</button>' +
+              '<button type="button" data-move="down" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>下</button>' +
+              '<button type="button" data-move="bottom" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>末尾</button>' +
+              '<button type="button" data-delete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>削除</button>' +
+            '</div>' +
+            '<div class="action-row">' +
+              '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
+              '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
+              '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
+              '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
+              buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
+              '</select>' +
+              '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
+              '<option value="red"' + (e.label_color === 'red' ? ' selected' : '') + '>色:赤</option>' +
+              '<option value="orange"' + (e.label_color === 'orange' ? ' selected' : '') + '>色:橙</option>' +
+              '<option value="yellow"' + (e.label_color === 'yellow' ? ' selected' : '') + '>色:黄</option>' +
+              '<option value="green"' + (e.label_color === 'green' ? ' selected' : '') + '>色:緑</option>' +
+              '<option value="blue"' + ((e.label_color === 'blue' || !e.label_color) ? ' selected' : '') + '>色:青</option>' +
+              '<option value="purple"' + (e.label_color === 'purple' ? ' selected' : '') + '>色:紫</option>' +
+              '</select>' +
+            '</div>' +
+          '</td>' +
+          '<td class="select-cell" data-list-col="select"><input type="checkbox" data-select-id="' + e.id + '"' + (selectedEntryIds.has(Number(e.id)) ? ' checked' : '') + ' /></td>' +
+        '</tr>',
+      detailHtml: detailRow
+    };
+  }
+
+  function patchRenderedRow(id) {
+    const entry = entries.find((item) => item.id === id);
+    if (!entry) return;
+    const filtered = getFilteredEntries();
+    const filteredIndex = filtered.findIndex((item) => item.id === id);
+    if (filteredIndex < 0) {
+      renderRows();
+      return;
+    }
+    const runningById = new Map();
+    let running = openingBalance;
+    for (const item of filtered) {
+      const amount = Number(item.amount || 0);
+      running += item.type === 'income' ? amount : -amount;
+      runningById.set(item.id, running);
+    }
+    const entryRunning = Number(runningById.get(id) || 0);
+    const nodes = rowsEl.querySelectorAll('tr[data-entry-id="' + id + '"], tr[data-parent-id="' + id + '"]');
+    const existingMainRow = rowsEl.querySelector('tr[data-entry-id="' + id + '"]');
+    if (!(existingMainRow instanceof HTMLTableRowElement)) {
+      renderRows();
+      return;
+    }
+    const rendered = renderEntryRowHtml(entry, filteredIndex, running, entryRunning);
+    existingMainRow.outerHTML = rendered.rowHtml + rendered.detailHtml;
+    if (nodes.length > 0) {
+      syncListScrollWidth();
+    }
+    applyListColumnVisibility();
+    updateBulkSelectionCaption();
+  }
+
   function getSelectedIdsInCurrentEntries() {
     const validIds = new Set(entries.map((e) => Number(e.id)));
     const fromMemory = [...selectedEntryIds].filter((id) => validIds.has(id));
@@ -3214,6 +3811,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
       rowsEl.innerHTML = '<tr><td colspan="15" class="muted">データがありません。上のフォームから予定を追加してください。</td></tr>';
       listFilterCaptionEl.textContent = '';
       updateBulkSelectionCaption();
+      syncListScrollWidth();
       return;
     }
 
@@ -3226,6 +3824,7 @@ function renderAppPage(email: string, isAdmin: boolean) {
     if (filtered.length === 0) {
       rowsEl.innerHTML = '<tr><td colspan="15" class="muted">絞り込み条件に一致する予定はありません。</td></tr>';
       updateBulkSelectionCaption();
+      syncListScrollWidth();
       return;
     }
 
@@ -3238,66 +3837,13 @@ function renderAppPage(email: string, isAdmin: boolean) {
     }
 
     rowsEl.innerHTML = filtered.map((e, idx) => {
-      const amount = Number(e.amount);
       const entryRunning = Number(runningById.get(e.id) || 0);
-      const runningClass = entryRunning < 0 ? 'minus' : 'plus';
-      const rowClass = Number(e.is_completed) === 1 ? ' class="completed"' : '';
-      const hasMgmt = String(e.import_management_no || '').trim() !== '';
-      const expanded = expandedMgmtIds.has(Number(e.id));
-      const toggleLabel = expanded ? '−' : '+';
-      const toggleButton = hasMgmt
-        ? '<button type="button" class="toggle-mgmt" data-togglemgmt="1" data-id="' + e.id + '">' + toggleLabel + '</button>'
-        : '';
-      const detailRow = hasMgmt && expanded
-        ? '<tr class="detail-row"><td></td><td colspan="14">入出金管理No: ' + escapeHtml(String(e.import_management_no || '')) + '</td></tr>'
-        : '';
-
-      return '<tr' + rowClass + '>' +
-        '<td class="toggle-cell" data-list-col="toggle">' + toggleButton + '</td>' +
-        '<td data-list-col="index">' + (idx + 1) + '</td>' +
-        '<td data-list-col="label">' +
-          '<span class="label-dot label-' + escapeHtml(String(e.label_color || 'blue')) + '"></span>' +
-        '</td>' +
-        '<td data-list-col="scheduled_date">' + escapeHtml(e.scheduled_date) + '</td>' +
-        '<td data-list-col="type">' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
-        '<td data-list-col="cf_category">' + escapeHtml(e.cf_category || '未設定') + '</td>' +
-        '<td data-list-col="title">' + escapeHtml(e.title) + '</td>' +
-        '<td class="amount ' + e.type + '" data-list-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
-        '<td data-list-col="note">' + escapeHtml(e.note || '') + '</td>' +
-        '<td data-list-col="actual_date">' + escapeHtml(e.actual_transaction_date || '') + '</td>' +
-        '<td data-list-col="customer_name">' + escapeHtml(e.customer_name || '') + '</td>' +
-        '<td data-list-col="staff_name">' + escapeHtml(e.staff_name || '') + '</td>' +
-        '<td class="running ' + runningClass + '" data-list-col="running">' + (entryRunning > 0 ? '+' : '') + fmt.format(entryRunning) + '</td>' +
-        '<td class="actions" data-list-col="actions">' +
-          '<div class="action-row">' +
-            '<button type="button" data-move="top" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>先頭</button>' +
-            '<button type="button" data-move="up" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>上</button>' +
-            '<button type="button" data-move="down" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>下</button>' +
-            '<button type="button" data-move="bottom" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>末尾</button>' +
-            '<button type="button" data-delete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>削除</button>' +
-          '</div>' +
-          '<div class="action-row">' +
-            '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
-            '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
-            '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
-            '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
-            buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
-            '</select>' +
-            '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
-            '<option value="red"' + (e.label_color === 'red' ? ' selected' : '') + '>色:赤</option>' +
-            '<option value="orange"' + (e.label_color === 'orange' ? ' selected' : '') + '>色:橙</option>' +
-            '<option value="yellow"' + (e.label_color === 'yellow' ? ' selected' : '') + '>色:黄</option>' +
-            '<option value="green"' + (e.label_color === 'green' ? ' selected' : '') + '>色:緑</option>' +
-            '<option value="blue"' + ((e.label_color === 'blue' || !e.label_color) ? ' selected' : '') + '>色:青</option>' +
-            '<option value="purple"' + (e.label_color === 'purple' ? ' selected' : '') + '>色:紫</option>' +
-            '</select>' +
-          '</div>' +
-        '</td>' +
-        '<td class="select-cell" data-list-col="select"><input type="checkbox" data-select-id="' + e.id + '"' + (selectedEntryIds.has(Number(e.id)) ? ' checked' : '') + ' /></td>' +
-      '</tr>' + detailRow;
+      const rendered = renderEntryRowHtml(e, idx, running, entryRunning);
+      return rendered.rowHtml + rendered.detailHtml;
     }).join('');
     applyListColumnVisibility();
     updateBulkSelectionCaption();
+    syncListScrollWidth();
   }
 
   async function bulkUpdate(action, payload, successMessage) {
@@ -3443,8 +3989,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
         showBanner(statusBanner, 'error', '完了更新に失敗しました。');
         return;
       }
-      showBanner(statusBanner, 'ok', Number(target.is_completed) === 1 ? '完了を解除しました。' : '予定を完了にしました。');
-      await loadAll();
+      patchEntryInMemory(id, { is_completed: Number(target.is_completed) === 1 ? 0 : 1 });
+      patchRenderedRow(id);
     } catch (_) {
       showBanner(statusBanner, 'error', '完了処理中に通信エラーが発生しました。');
     }
@@ -3471,8 +4017,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
         showBanner(statusBanner, 'error', '日付の更新に失敗しました。');
         return;
       }
-      showBanner(statusBanner, 'ok', '予定日を更新しました。');
-      await loadAll();
+      patchEntryInMemory(id, { scheduled_date: normalized });
+      patchRenderedRow(id);
     } catch (_) {
       showBanner(statusBanner, 'error', '日付更新中に通信エラーが発生しました。');
     }
@@ -3494,8 +4040,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
         showBanner(statusBanner, 'error', '実際入出金日の更新に失敗しました。');
         return;
       }
-      showBanner(statusBanner, 'ok', '実際入出金日を更新しました。');
-      await loadAll();
+      patchEntryInMemory(id, { actual_transaction_date: normalized });
+      patchRenderedRow(id);
     } catch (_) {
       showBanner(statusBanner, 'error', '実際入出金日の更新中に通信エラーが発生しました。');
     }
@@ -3572,6 +4118,8 @@ function renderAppPage(email: string, isAdmin: boolean) {
     if (target.dataset.editcfcategory && target.dataset.id) {
       const id = Number(target.dataset.id);
       const cfCategory = String(target.value || '').trim();
+      const current = entries.find((entry) => entry.id === id);
+      const previousCfCategory = String(current?.cf_category || '');
       try {
         const res = await fetch('/api/entries/' + encodeURIComponent(String(id)) + '/cf-category', {
           method: 'POST',
@@ -3580,20 +4128,23 @@ function renderAppPage(email: string, isAdmin: boolean) {
         });
         if (!res.ok) {
           showBanner(statusBanner, 'error', 'CF区分の更新に失敗しました。');
-          await loadAll();
+          target.value = previousCfCategory;
           return;
         }
-        showBanner(statusBanner, 'ok', 'CF区分を更新しました。');
-        await loadAll();
+        patchEntryInMemory(id, { cf_category: cfCategory });
+        patchRenderedRow(id);
+        if (isEditMode) refreshStatementFrame();
       } catch (_) {
         showBanner(statusBanner, 'error', 'CF区分更新中に通信エラーが発生しました。');
-        await loadAll();
+        target.value = previousCfCategory;
       }
       return;
     }
     if (!target.dataset.editcolor || !target.dataset.id) return;
     const id = Number(target.dataset.id);
     const labelColor = String(target.value || '').trim();
+    const current = entries.find((entry) => entry.id === id);
+    const previousLabelColor = String(current?.label_color || 'blue');
     try {
       const res = await fetch('/api/entries/' + encodeURIComponent(String(id)) + '/color', {
         method: 'POST',
@@ -3602,16 +4153,20 @@ function renderAppPage(email: string, isAdmin: boolean) {
       });
       if (!res.ok) {
         showBanner(statusBanner, 'error', '色ラベルの更新に失敗しました。');
-        await loadAll();
+        target.value = previousLabelColor;
         return;
       }
-      showBanner(statusBanner, 'ok', '色ラベルを更新しました。');
-      await loadAll();
+      patchEntryInMemory(id, { label_color: labelColor });
+      patchRenderedRow(id);
     } catch (_) {
       showBanner(statusBanner, 'error', '色ラベル更新中に通信エラーが発生しました。');
-      await loadAll();
+      target.value = previousLabelColor;
     }
   });
+
+  listScrollSyncEl?.addEventListener('scroll', syncTableScrollPositionFromTop, { passive: true });
+  listSectionBody?.addEventListener('scroll', syncListScrollPositionFromTable, { passive: true });
+  window.addEventListener('resize', syncListScrollWidth);
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -4036,6 +4591,42 @@ function renderAppPage(email: string, isAdmin: boolean) {
     document.body.removeChild(link);
   });
 
+  downloadMasterCsvBtn?.addEventListener('click', () => {
+    const rows = [
+      ['master_type', 'master_key', 'master_label', 'target', 'description', 'sort_order'],
+      ...MASTER_CF_CATEGORIES.map((item) => [
+        item.kind,
+        item.key,
+        item.label,
+        item.target,
+        item.description,
+        String(item.sortOrder)
+      ]),
+      ...MASTER_LABEL_COLORS.map((item) => [
+        item.kind,
+        item.key,
+        item.label,
+        item.target,
+        item.description,
+        String(item.sortOrder)
+      ])
+    ];
+    const csvContent = rows
+      .map((row) => row.map((val) => '"' + String(val).replace(/"/g, '""') + '"').join(','))
+      .join(String.fromCharCode(13, 10));
+    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+    const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'cashflow_master.csv';
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  });
+
   bulkSelectVisibleBtn?.addEventListener('click', () => {
     for (const e of getFilteredEntries()) selectedEntryIds.add(Number(e.id));
     renderRows();
@@ -4297,8 +4888,10 @@ bindChartTooltip('trend');
 function renderCashflowStatementPage(
   email: string,
   isAdmin: boolean,
-  cashflowStatementData: CashflowStatementData
+  cashflowStatementData: CashflowStatementData,
+  options?: { embedded?: boolean }
 ) {
+  const embedded = options?.embedded === true;
   const displayColumns = buildCashflowStatementDisplayColumns(2026, 2031, new Date());
   const printableMonthColumns = displayColumns.map((column, index) => ({ column, index }));
   const uncategorizedCount = cashflowStatementData.uncategorizedCount;
@@ -4438,6 +5031,12 @@ function renderCashflowStatementPage(
       .table-wrap { overflow:visible; border-top:1px solid var(--line); }
       .month-col { min-width:0; }
     }
+    ${embedded ? `
+    .wrap { padding: 0; }
+    .head { display: none; }
+    .panel { max-width: none; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+    .panel-body { padding: 12px; }
+    ` : ''}
   </style>
 </head>
 <body>
