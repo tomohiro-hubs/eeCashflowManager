@@ -244,6 +244,24 @@ const setupStatements = [
     first_failed_at TEXT NOT NULL,
     blocked_until TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS app_error_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT,
+    user_id INTEGER,
+    organization_id INTEGER,
+    source TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'error' CHECK(level IN ('error', 'warn')),
+    method TEXT,
+    path TEXT,
+    status_code INTEGER,
+    message TEXT NOT NULL,
+    error_name TEXT,
+    stack TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL
   )`
 ];
 
@@ -264,6 +282,7 @@ beforeEach(async () => {
   await env.DB.prepare('DELETE FROM password_reset_tokens').run();
   await env.DB.prepare('DELETE FROM cashflow_entry_backups').run();
   await env.DB.prepare('DELETE FROM cashflow_entry_audits').run();
+  await env.DB.prepare('DELETE FROM app_error_logs').run();
   await env.DB.prepare('DELETE FROM cashflow_entries').run();
   await env.DB.prepare('DELETE FROM users').run();
   await env.DB.prepare('DELETE FROM organizations').run();

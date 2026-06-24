@@ -18,6 +18,38 @@ type CashflowEntryBackupListRow = {
   restored_at: string | null;
   restored_by_email: string | null;
 };
+type AppErrorLogRow = {
+  id: number;
+  request_id: string | null;
+  user_id: number | null;
+  organization_id: number | null;
+  user_email: string | null;
+  organization_name: string | null;
+  source: string;
+  level: 'error' | 'warn';
+  method: string | null;
+  path: string | null;
+  status_code: number | null;
+  message: string;
+  error_name: string | null;
+  stack: string | null;
+  detail: string | null;
+  created_at: string;
+};
+type AppErrorLogInsert = {
+  requestId?: string | null;
+  userId?: number | null;
+  organizationId?: number | null;
+  source: string;
+  level?: 'error' | 'warn';
+  method?: string | null;
+  path?: string | null;
+  statusCode?: number | null;
+  message: string;
+  errorName?: string | null;
+  stack?: string | null;
+  detail?: unknown;
+};
 
 const CASHFLOW_BACKUP_RETENTION_DAYS = 7;
 
@@ -228,6 +260,43 @@ class CsvImportParseError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+async function recordAppError(db: D1Database, entry: AppErrorLogInsert): Promise<void> {
+  try {
+    const detailText = entry.detail === undefined
+      ? null
+      : typeof entry.detail === 'string'
+        ? entry.detail
+        : JSON.stringify(entry.detail);
+    await db.prepare(
+      `INSERT INTO app_error_logs
+        (request_id, user_id, organization_id, source, level, method, path, status_code, message, error_name, stack, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    ).bind(
+      entry.requestId ?? null,
+      entry.userId ?? null,
+      entry.organizationId ?? null,
+      entry.source,
+      entry.level ?? 'error',
+      entry.method ?? null,
+      entry.path ?? null,
+      entry.statusCode ?? null,
+      entry.message,
+      entry.errorName ?? null,
+      entry.stack ?? null,
+      detailText
+    ).run();
+  } catch (logError) {
+    console.error('failed to persist app error log', logError);
+  }
+}
+
+function serializeError(error: unknown): { message: string; name: string | null; stack: string | null } {
+  if (error instanceof Error) {
+    return { message: error.message || error.name || 'Error', name: error.name || 'Error', stack: error.stack ?? null };
+  }
+  return { message: String(error ?? 'Unknown error'), name: null, stack: null };
 }
 
 app.use('*', async (c, next) => {
@@ -445,6 +514,21 @@ app.post('/login', async (c) => {
 
 app.onError((err, c) => {
   const requestId = crypto.randomUUID();
+  const user = c.get('user');
+  const serialized = serializeError(err);
+  void recordAppError(c.env.DB, {
+    requestId,
+    userId: user?.id ?? null,
+    organizationId: user?.organizationId ?? null,
+    source: 'onError',
+    method: c.req.method,
+    path: c.req.path,
+    statusCode: 500,
+    message: serialized.message,
+    errorName: serialized.name,
+    stack: serialized.stack,
+    detail: { requestId }
+  });
   console.error(`[${requestId}] ${c.req.method} ${c.req.path}`, err);
   if (c.req.path.startsWith('/api/')) {
     return c.json({ error: 'Internal Server Error', requestId }, 500);
@@ -516,6 +600,29 @@ app.get('/audit', async (c) => {
   return c.html(renderAuditPage(user.email));
 });
 
+app.get('/admin/error-logs', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { user, organizationId } = auth;
+  if (!user.isAdmin) return c.text('Forbidden', 403);
+
+  const from = parseDateOnly(c.req.query('from'));
+  const to = parseDateOnly(c.req.query('to'));
+  const source = String(c.req.query('source') ?? '').trim();
+  const search = String(c.req.query('search') ?? '').trim();
+  if ((c.req.query('from') && !from) || (c.req.query('to') && !to)) {
+    return c.text('Invalid date. Use YYYY-MM-DD.', 400);
+  }
+
+  const errorLogs = await listAppErrorLogs(c.env.DB, organizationId, {
+    from,
+    to,
+    source,
+    search
+  });
+  return c.html(renderErrorLogsPage(user.email, errorLogs, { from, to, source, search }));
+});
+
 app.get('/admin/backups', async (c) => {
   const auth = requireOrganizationContext(c);
   if (auth instanceof Response) return auth;
@@ -544,6 +651,19 @@ app.post('/admin/backups/run', async (c) => {
     }
     return c.redirect(`/admin/backups?status=${backup ? 'created' : 'empty'}`);
   } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'backup-create',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack,
+      detail: { organizationId }
+    });
     console.error('cashflow backup create failed', { userId: user.id, organizationId, error });
     return c.html(renderBackupsPage(user.email, await listCashflowEntryBackups(c.env.DB, organizationId), 'バックアップ作成に失敗しました。'), 500);
   }
@@ -569,6 +689,19 @@ app.post('/admin/backups/:id/restore', async (c) => {
     ).bind(user.id, JSON.stringify({ backupId, organizationId, restoredCount })).run();
     return c.redirect('/admin/backups?status=restored');
   } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'backup-restore',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack,
+      detail: { backupId, organizationId }
+    });
     console.error('cashflow backup restore failed', { userId: user.id, organizationId, backupId, error });
     return c.html(renderBackupsPage(user.email, await listCashflowEntryBackups(c.env.DB, organizationId), 'バックアップ復元に失敗しました。'), 500);
   }
@@ -1045,6 +1178,19 @@ app.post('/api/import/rakuraku', async (c) => {
     try {
       form = await c.req.parseBody();
     } catch (error) {
+      const serialized = serializeError(error);
+      await recordAppError(c.env.DB, {
+        userId: user.id,
+        organizationId,
+        source: 'csv-import-preview',
+        method: c.req.method,
+        path: c.req.path,
+        statusCode: 400,
+        message: serialized.message,
+        errorName: serialized.name,
+        stack: serialized.stack,
+        detail: { phase: 'multipart-parse' }
+      });
       console.error('rakuraku import preview multipart parse failed', { userId: user.id, error });
       return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.multipartParseFailed, error: 'multipart/form-data の解析に失敗しました。' }, 400);
     }
@@ -1068,6 +1214,19 @@ app.post('/api/import/rakuraku', async (c) => {
     try {
       incomingRows = parseRakurakuCsvText(text);
     } catch (error) {
+      const serialized = serializeError(error);
+      await recordAppError(c.env.DB, {
+        userId: user.id,
+        organizationId,
+        source: 'csv-import-preview',
+        method: c.req.method,
+        path: c.req.path,
+        statusCode: error instanceof CsvImportParseError ? 400 : 500,
+        message: serialized.message,
+        errorName: serialized.name,
+        stack: serialized.stack,
+        detail: { phase: 'csv-parse' }
+      });
       console.error('rakuraku import csv parse failed', { userId: user.id, error });
       if (error instanceof CsvImportParseError) {
         return c.json({ ok: false, errorCode: error.code, error: error.message }, 400);
@@ -1201,6 +1360,18 @@ app.post('/api/import/rakuraku', async (c) => {
       totalRows: preparedRows.length
     });
   } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'csv-import-preview',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack
+    });
     console.error('rakuraku import preview failed', { userId: user.id, error });
     return c.json({ ok: false, errorCode: CSV_IMPORT_ERROR_CODES.internalError, error: 'CSV解析中にエラーが発生しました。' }, 500);
   }
@@ -1347,6 +1518,18 @@ app.post('/api/import/rakuraku/commit', async (c) => {
       message: 'インポート適用が完了しました。'
     });
   } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'csv-import-commit',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack
+    });
     console.error('rakuraku import commit failed', { userId: user.id, error });
     return c.json({ ok: false, error: 'インポート確定処理中にエラーが発生しました。' }, 500);
   }
@@ -1371,6 +1554,19 @@ app.post('/api/import/cashflow', async (c) => {
     try {
       form = await c.req.parseBody();
     } catch (error) {
+      const serialized = serializeError(error);
+      await recordAppError(c.env.DB, {
+        userId: user.id,
+        organizationId,
+        source: 'cashflow-import',
+        method: c.req.method,
+        path: c.req.path,
+        statusCode: 400,
+        message: serialized.message,
+        errorName: serialized.name,
+        stack: serialized.stack,
+        detail: { phase: 'multipart-parse' }
+      });
       console.error('cashflow import multipart parse failed', { userId: user.id, error });
       return c.json({ ok: false, error: 'multipart/form-data の解析に失敗しました。' }, 400);
     }
@@ -1640,6 +1836,18 @@ app.post('/api/import/cashflow', async (c) => {
       message: 'インポートが完了しました。'
     });
   } catch (error) {
+    const serialized = serializeError(error);
+    await recordAppError(c.env.DB, {
+      userId: user.id,
+      organizationId,
+      source: 'cashflow-import',
+      method: c.req.method,
+      path: c.req.path,
+      statusCode: 500,
+      message: serialized.message,
+      errorName: serialized.name,
+      stack: serialized.stack
+    });
     console.error('cashflow import failed', { userId: user.id, error });
     return c.json({ ok: false, error: 'CSV取り込み中にエラーが発生しました。' }, 500);
   }
@@ -2785,6 +2993,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       <button id="edit-mode-toggle" type="button" class="secondary" style="display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; min-width:110px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; background:rgba(255,255,255,.12); font-size:13px; cursor:pointer; position:relative; z-index:30; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent;">編集モード</button>
       <a href="/fiscal" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">年間サマリー</a>
       ${isAdmin ? '<a href="/admin/backups" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">バックアップ</a>' : ''}
+      ${isAdmin ? '<a href="/admin/error-logs" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">エラーログ</a>' : ''}
       ${isAdmin ? '<a href="/audit" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">監査ログ</a>' : ''}
       <form method="post" action="/logout" style="display:inline-flex;">
         <button class="secondary">ログアウト</button>
@@ -5139,6 +5348,7 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     <div class="filters" aria-label="決算期間選択">
       <a href="/app" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">Cashflow Managerへ戻る</a>
       ${isAdmin ? '<a href="/admin/backups" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">バックアップ</a>' : ''}
+      ${isAdmin ? '<a href="/admin/error-logs" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">エラーログ</a>' : ''}
       ${isAdmin ? '<a href="/audit" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">監査ログ</a>' : ''}
       <select id="start-month" aria-label="開始月"></select>
       <select id="end-month" aria-label="終了月"></select>
@@ -5454,6 +5664,7 @@ function renderCashflowStatementPage(
     <div class="actions">
       <a href="/app">Cashflow Managerへ戻る</a>
       <a href="/fiscal">年間サマリー</a>
+      ${isAdmin ? '<a href="/admin/error-logs">エラーログ</a>' : ''}
       ${isAdmin ? '<a href="/audit">監査ログ</a>' : ''}
     </div>
   </header>
@@ -5931,7 +6142,7 @@ function renderAuditPage(email: string) {
     table{width:100%;border-collapse:collapse;font-size:13px;min-width:860px}
     th,td{border-bottom:1px solid #e7edf4;text-align:left;padding:9px 8px;vertical-align:top}
     th{background:#f5f8fb;font-weight:700;color:#334e68}
-    .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+    .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#eef4ff;color:#265d9c}
     .tag.add{background:#edf9f1;color:var(--ok)}
     .tag.edit{background:#eef4ff;color:#265d9c}
     .tag.delete{background:#fef0f1;color:var(--warn)}
@@ -5949,6 +6160,7 @@ function renderAuditPage(email: string) {
       <a href="/app">Cashflow Managerへ戻る</a>
       <a href="/fiscal">Fiscal Studio</a>
       <a href="/admin/backups">バックアップ</a>
+      <a href="/admin/error-logs">エラーログ</a>
     </div>
   </header>
 
@@ -6072,6 +6284,175 @@ function renderAuditPage(email: string) {
   initDates();
   loadAudit();
 </script>
+</body>
+</html>`;
+}
+
+type AppErrorLogFilters = {
+  from: string | null;
+  to: string | null;
+  source: string;
+  search: string;
+};
+
+async function listAppErrorLogs(db: D1Database, organizationId: number, filters: AppErrorLogFilters): Promise<AppErrorLogRow[]> {
+  const clauses = ['e.organization_id = ?'];
+  const bindValues: Array<string | number | null> = [organizationId];
+
+  if (filters.from) {
+    clauses.push('e.created_at >= ?');
+    bindValues.push(toAuditUtcStart(filters.from));
+  }
+  if (filters.to) {
+    clauses.push('e.created_at < ?');
+    bindValues.push(toAuditUtcEndExclusive(filters.to));
+  }
+  if (filters.source) {
+    clauses.push('e.source = ?');
+    bindValues.push(filters.source);
+  }
+  if (filters.search) {
+    clauses.push('(e.message LIKE ? OR e.path LIKE ? OR e.detail LIKE ? OR COALESCE(e.request_id, \'\') LIKE ?)');
+    const like = `%${filters.search}%`;
+    bindValues.push(like, like, like, like);
+  }
+
+  const rows = await db.prepare(
+    `SELECT
+      e.id,
+      e.request_id,
+      e.user_id,
+      e.organization_id,
+      u.email AS user_email,
+      o.name AS organization_name,
+      e.source,
+      e.level,
+      e.method,
+      e.path,
+      e.status_code,
+      e.message,
+      e.error_name,
+      e.stack,
+      e.detail,
+      e.created_at
+     FROM app_error_logs e
+     LEFT JOIN users u ON u.id = e.user_id
+     LEFT JOIN organizations o ON o.id = e.organization_id
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY e.created_at DESC, e.id DESC
+     LIMIT 200`
+  ).bind(...bindValues).all<AppErrorLogRow>();
+
+  return rows.results ?? [];
+}
+
+function renderErrorLogsPage(email: string, logs: AppErrorLogRow[], filters: AppErrorLogFilters) {
+  const sources = ['', 'onError', 'csv-import', 'csv-import-preview', 'csv-import-commit', 'backup-create', 'backup-restore', 'scheduled-job'];
+  return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>エラーログ | Cashflow</title>
+  <style>
+    :root { --bg:#eef2f6; --panel:#fff; --line:#d4dde7; --text:#1d2733; --muted:#5e7188; --accent:#0f4c81; --warn:#b22a34; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:"Noto Sans JP","Hiragino Sans",sans-serif;background:linear-gradient(180deg,#f7f9fc 0%, var(--bg) 100%);color:var(--text)}
+    .wrap{max-width:1280px;margin:0 auto;padding:18px 16px 36px}
+    .head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+    .title{font-size:30px;font-weight:700}
+    .sub{font-size:13px;color:var(--muted)}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    .actions a,.actions button,.actions select,.actions input{padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:var(--text);font-size:14px;text-decoration:none}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .toolbar label{font-size:12px;color:var(--muted)}
+    .table-wrap{overflow:auto;border:1px solid #e1e8f0;border-radius:10px;margin-top:10px}
+    table{width:100%;border-collapse:collapse;font-size:13px;min-width:1200px}
+    th,td{border-bottom:1px solid #e7edf4;text-align:left;padding:9px 8px;vertical-align:top}
+    th{background:#f5f8fb;font-weight:700;color:#334e68}
+    .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+    .tag.error{background:#fef0f1;color:var(--warn)}
+    .tag.warn{background:#fff4db;color:#8b5e00}
+    .muted{color:var(--muted)}
+    .stack{white-space:pre-wrap;max-width:440px;max-height:180px;overflow:auto;background:#f8fafc;border:1px solid #e1e8f0;border-radius:8px;padding:8px;font-size:12px;line-height:1.5}
+    .summary{font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header class="head">
+    <div>
+      <div class="title">エラーログ</div>
+      <div class="sub">Worker の例外・CSV取込み失敗・バックアップ失敗などを確認できます | ${escapeHtml(email)}</div>
+    </div>
+    <div class="actions">
+      <a href="/app">Cashflow Managerへ戻る</a>
+      <a href="/fiscal">Fiscal Studio</a>
+      <a href="/admin/error-logs">エラーログ</a>
+      <a href="/audit">監査ログ</a>
+      <a href="/admin/backups">バックアップ</a>
+    </div>
+  </header>
+
+  <section class="panel">
+    <form class="toolbar" method="get" action="/admin/error-logs">
+      <label>開始日 <input name="from" type="date" value="${escapeHtml(filters.from || '')}" /></label>
+      <label>終了日 <input name="to" type="date" value="${escapeHtml(filters.to || '')}" /></label>
+      <label>発生源
+        <select name="source">
+          ${sources.map((source) => `<option value="${escapeHtml(source)}"${source === filters.source ? ' selected' : ''}>${escapeHtml(source || 'すべて')}</option>`).join('')}
+        </select>
+      </label>
+      <label>検索 <input name="search" type="text" value="${escapeHtml(filters.search || '')}" placeholder="message / path / request id" /></label>
+      <button type="submit">更新</button>
+    </form>
+    <div class="summary" style="margin-top:10px;">表示件数: ${logs.length}</div>
+  </section>
+
+  <section class="panel">
+    <div class="table-wrap">
+      ${logs.length > 0 ? `
+      <table>
+        <thead>
+          <tr>
+            <th>時刻</th>
+            <th>ユーザー</th>
+            <th>組織</th>
+            <th>発生源</th>
+            <th>レベル</th>
+            <th>Request ID</th>
+            <th>Method</th>
+            <th>Path</th>
+            <th>Status</th>
+            <th>Message</th>
+            <th>Detail</th>
+            <th>Stack</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${logs.map((log) => `
+            <tr>
+              <td>${escapeHtml(formatJstDateTime(log.created_at))}</td>
+              <td>${escapeHtml(log.user_email || '-')}</td>
+              <td>${escapeHtml(log.organization_name || '-')}</td>
+              <td><span class="tag">${escapeHtml(log.source)}</span></td>
+              <td><span class="tag ${escapeHtml(log.level)}">${escapeHtml(log.level)}</span></td>
+              <td class="muted">${escapeHtml(log.request_id || '-')}</td>
+              <td>${escapeHtml(log.method || '-')}</td>
+              <td>${escapeHtml(log.path || '-')}</td>
+              <td>${escapeHtml(String(log.status_code ?? '-'))}</td>
+              <td>${escapeHtml(log.message)}</td>
+              <td class="muted">${escapeHtml(log.detail || '-')}</td>
+              <td>${log.stack ? `<div class="stack">${escapeHtml(log.stack)}</div>` : '<span class="muted">-</span>'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      ` : `<div class="empty" style="padding:18px;color:var(--muted);text-align:center;">まだログはありません。</div>`}
+    </div>
+  </section>
+</main>
 </body>
 </html>`;
 }

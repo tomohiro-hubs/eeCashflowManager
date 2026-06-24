@@ -800,6 +800,42 @@ describe('rakuraku csv import errors', () => {
     );
   });
 
+  it('stores error logs for malformed multipart csv imports and shows them in admin view', async () => {
+    const cookie = await createAuthedCookie('error-log-admin@example.com', { isAdmin: true, role: 'owner' });
+    const res = await fetchApp('/api/import/cashflow', {
+      method: 'POST',
+      headers: {
+        cookie,
+        'content-type': 'multipart/form-data; boundary=broken-boundary'
+      },
+      body: '--broken-boundary\r\nContent-Disposition: form-data; name="file"; filename="broken.csv"\r\n\r\nnot-a-real-multipart-body'
+    });
+
+    expect(res.status).toBe(400);
+
+    const logRows = await env.DB.prepare(
+      `SELECT source, method, path, status_code, message
+       FROM app_error_logs
+       WHERE source = 'cashflow-import'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).all<{ source: string; method: string; path: string; status_code: number; message: string }>();
+
+    expect(logRows.results).toHaveLength(1);
+    expect(logRows.results?.[0]).toMatchObject({
+      source: 'cashflow-import',
+      method: 'POST',
+      path: '/api/import/cashflow',
+      status_code: 400
+    });
+
+    const adminPage = await fetchApp('/admin/error-logs', {
+      headers: { cookie }
+    });
+    expect(adminPage.status).toBe(200);
+    await expect(adminPage.text()).resolves.toContain('cashflow-import');
+  });
+
   it('updates existing entries by managementNo on re-import', async () => {
     const cookie = await createAuthedCookie('csv-upsert@example.com');
     const row1 = {
