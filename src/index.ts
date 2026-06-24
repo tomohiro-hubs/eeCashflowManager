@@ -2082,6 +2082,7 @@ app.patch('/api/entries/:id', async (c) => {
     staffName?: string;
     labelColor?: string;
     cfCategory?: string;
+    importManagementNo?: string;
     actualTransactionDate?: string | null;
     isCompleted?: boolean;
   }>(c);
@@ -2094,6 +2095,7 @@ app.patch('/api/entries/:id', async (c) => {
   const staffName = typeof body.staffName === 'string' ? body.staffName.trim() : '';
   const labelColor = typeof body.labelColor === 'string' ? body.labelColor.trim() : '';
   const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
+  const importManagementNo = typeof body.importManagementNo === 'string' ? body.importManagementNo.trim() : '';
   const type = body.type === 'expense' ? 'expense' : body.type === 'income' ? 'income' : '';
   const scheduledDate = parseDateOnly(body.scheduledDate);
   const actualTransactionDateRaw = body.actualTransactionDate == null ? '' : String(body.actualTransactionDate).trim();
@@ -2153,7 +2155,7 @@ app.patch('/api/entries/:id', async (c) => {
 
   const result = await c.env.DB.prepare(
     `UPDATE cashflow_entries
-     SET title = ?, amount = ?, type = ?, scheduled_date = ?, order_index = ?, note = ?, account_name = ?, actual_transaction_date = ?, customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?, is_completed = ?, updated_at = datetime('now')
+     SET title = ?, amount = ?, type = ?, scheduled_date = ?, order_index = ?, note = ?, account_name = ?, actual_transaction_date = ?, customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?, import_management_no = ?, is_completed = ?, updated_at = datetime('now')
      WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
   )
     .bind(
@@ -2169,6 +2171,7 @@ app.patch('/api/entries/:id', async (c) => {
       staffName || null,
       labelColor,
       cfCategory,
+      importManagementNo || null,
       isCompleted ? 1 : 0,
       id,
       organizationId
@@ -2208,6 +2211,7 @@ app.patch('/api/entries/:id', async (c) => {
       staff_name: staffName || null,
       label_color: labelColor,
       cf_category: cfCategory,
+      import_management_no: importManagementNo || null,
       is_completed: isCompleted ? 1 : 0
     }
   });
@@ -3212,6 +3216,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
           <div class="field-hint">0-140文字</div>
         </div>
         <div class="field">
+          <label for="entry-edit-import-management-no">入出金管理No</label>
+          <input id="entry-edit-import-management-no" name="importManagementNo" maxlength="80" />
+          <div class="field-hint">任意 / 80文字以内</div>
+        </div>
+        <div class="field">
           <label for="entry-edit-account-name">口座名</label>
           <select id="entry-edit-account-name" name="accountName">
             <option value="">未設定</option>
@@ -3292,6 +3301,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const entryEditActualDate = document.getElementById('entry-edit-actual-date');
   const entryEditCfCategory = document.getElementById('entry-edit-cf-category');
   const entryEditNote = document.getElementById('entry-edit-note');
+  const entryEditImportManagementNo = document.getElementById('entry-edit-import-management-no');
   const entryEditAccountName = document.getElementById('entry-edit-account-name');
   const entryEditCustomerName = document.getElementById('entry-edit-customer-name');
   const entryEditStaffName = document.getElementById('entry-edit-staff-name');
@@ -3640,6 +3650,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (entryEditScheduledDate instanceof HTMLInputElement) entryEditScheduledDate.value = String(entry.scheduled_date || '');
     if (entryEditActualDate instanceof HTMLInputElement) entryEditActualDate.value = String(entry.actual_transaction_date || '');
     if (entryEditNote instanceof HTMLInputElement) entryEditNote.value = String(entry.note || '');
+    if (entryEditImportManagementNo instanceof HTMLInputElement) entryEditImportManagementNo.value = String(entry.import_management_no || '');
     if (entryEditAccountName instanceof HTMLSelectElement) entryEditAccountName.value = String(entry.account_name || '');
     if (entryEditCustomerName instanceof HTMLInputElement) entryEditCustomerName.value = String(entry.customer_name || '');
     if (entryEditStaffName instanceof HTMLInputElement) entryEditStaffName.value = String(entry.staff_name || '');
@@ -4385,6 +4396,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       type: String(entryEditType instanceof HTMLSelectElement ? entryEditType.value : 'income'),
       scheduledDate: normalizeDate(String(entryEditScheduledDate instanceof HTMLInputElement ? entryEditScheduledDate.value : '')),
       note: String(entryEditNote instanceof HTMLInputElement ? entryEditNote.value : '').trim(),
+      importManagementNo: String(entryEditImportManagementNo instanceof HTMLInputElement ? entryEditImportManagementNo.value : '').trim(),
       accountName: String(entryEditAccountName instanceof HTMLSelectElement ? entryEditAccountName.value : ''),
       customerName: String(entryEditCustomerName instanceof HTMLInputElement ? entryEditCustomerName.value : '').trim(),
       staffName: String(entryEditStaffName instanceof HTMLInputElement ? entryEditStaffName.value : '').trim(),
