@@ -128,6 +128,20 @@ describe('auth gate', () => {
     expect(res.headers.get('permissions-policy')).toBe('geolocation=(), microphone=(), camera=()');
   });
 
+  it('disables self registration', async () => {
+    const getRes = await fetchApp('/register');
+    expect(getRes.status).toBe(403);
+    await expect(getRes.text()).resolves.toContain('新規アカウント作成は停止しています。');
+
+    const postRes = await fetchApp('/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'email=test@example.com&password=testpassword1!&passwordConfirm=testpassword1!'
+    });
+    expect(postRes.status).toBe(403);
+    await expect(postRes.text()).resolves.toContain('新規アカウント作成は停止しています。');
+  });
+
   it('blocks cross-site mutating request by CSRF guard', async () => {
     const cookie = await createAuthedCookie();
     const res = await fetchApp('/api/entries', {

@@ -36,7 +36,7 @@ const PASSWORD_ALGO_LEGACY = 'sha256_iter120k';
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_BLOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
-const REGISTRATION_ENABLED = true;
+const REGISTRATION_ENABLED = false;
 const ENTRY_LABEL_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
 const ENTRY_LABEL_COLOR_LABELS: Record<(typeof ENTRY_LABEL_COLORS)[number], string> = {
   red: '赤',
@@ -319,7 +319,7 @@ app.get('/', (c) => {
 app.get('/login', (c) => c.html(renderAuthPage('login')));
 app.get('/login/', (c) => c.redirect('/login'));
 app.get('/register', (c) => {
-  if (!REGISTRATION_ENABLED) return c.redirect('/login');
+  if (!REGISTRATION_ENABLED) return c.html(renderAuthPage('login', '新規アカウント作成は停止しています。管理者から案内されたアカウントでログインしてください。'), 403);
   return c.html(renderAuthPage('register'));
 });
 
@@ -2337,9 +2337,7 @@ function renderAuthPage(mode: 'login' | 'register' | 'forgot' | 'reset', error?:
   const action = isLogin || isRegister ? `/${mode}` : isForgot ? '/forgot-password' : '/reset-password';
   const submitLabel = isLogin ? 'ログイン' : isRegister ? 'アカウント作成' : isForgot ? '再設定メールを送信' : 'パスワードを更新';
   const helper = isLogin
-    ? (REGISTRATION_ENABLED
-      ? '一時的に新規登録を有効にしています。アカウントがない場合は /register から作成してください。'
-      : 'ログイン情報は管理者から案内されたアカウントをご利用ください。')
+    ? 'ログイン情報は管理者から案内されたアカウントをご利用ください。'
     : isRegister
       ? '登録後はこのメールアドレスとパスワードでログインできます。'
       : 'ログイン情報は管理者から案内されたアカウントをご利用ください。';
@@ -2375,7 +2373,7 @@ function renderAuthPage(mode: 'login' | 'register' | 'forgot' | 'reset', error?:
       ${isReset ? '<label>新しいパスワード（確認）</label><input type="password" name="passwordConfirm" minlength="8" required />' : ''}
       <button type="submit">${submitLabel}</button>
     </form>
-    ${isLogin && REGISTRATION_ENABLED ? '<p><a href="/register">新規登録はこちら</a></p>' : ''}
+    ${isLogin ? '<p style="color:#5e7188;">新規アカウント作成は停止しています。</p>' : ''}
     <p>${helper}</p>
   </main>
 </body>
