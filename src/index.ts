@@ -2064,6 +2064,155 @@ app.post('/api/entries/:id/cf-category', async (c) => {
   return c.json({ ok: true, cfCategory });
 });
 
+app.patch('/api/entries/:id', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { user, organizationId } = auth;
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Invalid id' }, 400);
+
+  const body = await parseJsonBody<{
+    title?: string;
+    amount?: unknown;
+    type?: 'income' | 'expense';
+    scheduledDate?: string;
+    note?: string;
+    accountName?: string;
+    customerName?: string;
+    staffName?: string;
+    labelColor?: string;
+    cfCategory?: string;
+    actualTransactionDate?: string | null;
+    isCompleted?: boolean;
+  }>(c);
+  if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
+
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const note = typeof body.note === 'string' ? body.note.trim() : '';
+  const accountName = typeof body.accountName === 'string' ? body.accountName.trim() : '';
+  const customerName = typeof body.customerName === 'string' ? body.customerName.trim() : '';
+  const staffName = typeof body.staffName === 'string' ? body.staffName.trim() : '';
+  const labelColor = typeof body.labelColor === 'string' ? body.labelColor.trim() : '';
+  const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
+  const type = body.type === 'expense' ? 'expense' : body.type === 'income' ? 'income' : '';
+  const scheduledDate = parseDateOnly(body.scheduledDate);
+  const actualTransactionDateRaw = body.actualTransactionDate == null ? '' : String(body.actualTransactionDate).trim();
+  const actualTransactionDate = actualTransactionDateRaw === '' ? null : parseDateOnly(actualTransactionDateRaw);
+  const isCompleted = typeof body.isCompleted === 'boolean'
+    ? body.isCompleted
+    : Number(body.isCompleted) === 1;
+  const amount = Number(body.amount);
+
+  if (!actualTransactionDate && actualTransactionDateRaw !== '') {
+    return c.json({ error: 'Invalid date. Use YYYY-MM-DD.' }, 400);
+  }
+  if (!scheduledDate || type === '' || !isValidEntryInput({
+    title,
+    note,
+    amount,
+    type,
+    scheduledDate,
+    accountName,
+    customerName,
+    staffName,
+    labelColor,
+    cfCategory
+  }, new Set(['', ...getCfCategoriesByEntryType(type)]))) {
+    return c.json({ error: 'Invalid payload' }, 400);
+  }
+
+  const existing = await c.env.DB.prepare(
+    `SELECT scheduled_date, order_index, title, amount, type, is_completed
+     FROM cashflow_entries
+     WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
+  )
+    .bind(id, organizationId)
+    .first<{
+      scheduled_date: string;
+      order_index: number;
+      title: string;
+      amount: number;
+      type: 'income' | 'expense';
+      is_completed: number;
+    }>();
+  if (!existing) return c.json({ error: 'Entry not found' }, 404);
+
+  const fromMonth = existing.scheduled_date.slice(0, 7);
+  const toMonth = scheduledDate.slice(0, 7);
+  let nextOrder = Number(existing.order_index);
+  if (fromMonth !== toMonth) {
+    const maxRow = await c.env.DB.prepare(
+      `SELECT COALESCE(MAX(order_index), 0) as max_order
+       FROM cashflow_entries
+       WHERE organization_id = ? AND substr(scheduled_date, 1, 7) = ? AND deleted_at IS NULL`
+    )
+      .bind(organizationId, toMonth)
+      .first<{ max_order: number }>();
+    nextOrder = Number(maxRow?.max_order ?? 0) + 1;
+  }
+
+  const result = await c.env.DB.prepare(
+    `UPDATE cashflow_entries
+     SET title = ?, amount = ?, type = ?, scheduled_date = ?, order_index = ?, note = ?, account_name = ?, actual_transaction_date = ?, customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?, is_completed = ?, updated_at = datetime('now')
+     WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
+  )
+    .bind(
+      title,
+      amount,
+      type,
+      scheduledDate,
+      nextOrder,
+      note || null,
+      accountName || null,
+      actualTransactionDate,
+      customerName || null,
+      staffName || null,
+      labelColor,
+      cfCategory,
+      isCompleted ? 1 : 0,
+      id,
+      organizationId
+    )
+    .run();
+  if ((result.meta?.changes ?? 0) < 1) return c.json({ error: 'Entry not found' }, 404);
+
+  await c.env.DB.prepare(
+    `INSERT INTO user_operation_logs (user_id, action_type, target_type, target_id, detail)
+     VALUES (?, 'edit', 'cashflow_entry', ?, ?)`
+  ).bind(user.id, id, JSON.stringify({
+    scheduledDateFrom: existing.scheduled_date,
+    scheduledDateTo: scheduledDate,
+    titleFrom: existing.title,
+    titleTo: title,
+    amountFrom: Number(existing.amount ?? 0),
+    amountTo: amount,
+    typeFrom: existing.type,
+    typeTo: type,
+    isCompletedFrom: Number(existing.is_completed) === 1,
+    isCompletedTo: isCompleted
+  })).run();
+
+  return c.json({
+    ok: true,
+    entry: {
+      id,
+      title,
+      amount,
+      type,
+      scheduled_date: scheduledDate,
+      order_index: nextOrder,
+      note: note || null,
+      account_name: accountName || null,
+      actual_transaction_date: actualTransactionDate,
+      customer_name: customerName || null,
+      staff_name: staffName || null,
+      label_color: labelColor,
+      cf_category: cfCategory,
+      is_completed: isCompleted ? 1 : 0
+    }
+  });
+});
+
 app.post('/api/entries/bulk', async (c) => {
   const auth = requireOrganizationContext(c);
   if (auth instanceof Response) return auth;
@@ -2527,6 +2676,30 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .modal-close:hover {
       color: #333;
     }
+    .entry-edit-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .entry-edit-grid .field {
+      min-width: 0;
+    }
+    .entry-edit-grid .field > input,
+    .entry-edit-grid .field > select,
+    .entry-edit-grid .field > textarea {
+      width: 100%;
+      min-width: 0;
+    }
+    .entry-edit-grid .full {
+      grid-column: 1 / -1;
+    }
+    .entry-edit-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+    }
     /* ヘルプアイコンのスタイル */
     .help-icon {
       display: inline-flex;
@@ -2978,6 +3151,103 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   </div>
 </div>
 
+<div id="entry-edit-modal" class="modal-overlay">
+  <div class="modal-box" style="max-width: 980px; width: 96%;">
+    <span id="entry-edit-close" class="modal-close">&times;</span>
+    <h3 style="margin-top:0;">予定一覧の修正</h3>
+    <p style="font-size:13px; color:var(--muted); margin-bottom:10px;">
+      ここで1行分の内容をまとめて修正できます。保存すると予定一覧と集計が更新されます。
+    </p>
+    <form id="entry-edit-form" novalidate>
+      <input type="hidden" id="entry-edit-id" name="id" />
+      <div id="entry-edit-grid" class="entry-edit-grid">
+        <div class="field">
+          <label for="entry-edit-title">件名</label>
+          <input id="entry-edit-title" name="title" maxlength="120" required />
+          <div class="field-hint">1-120文字</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-amount">金額</label>
+          <input id="entry-edit-amount" name="amount" type="number" step="1" min="1" required />
+          <div class="field-hint">1円以上の整数</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-type">区分</label>
+          <select id="entry-edit-type" name="type">
+            <option value="income">入金</option>
+            <option value="expense">出金</option>
+          </select>
+          <div class="field-hint">入金 / 出金</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-label-color">色ラベル</label>
+          <select id="entry-edit-label-color" name="labelColor">
+            <option value="red">赤</option>
+            <option value="orange">橙</option>
+            <option value="yellow">黄</option>
+            <option value="green">緑</option>
+            <option value="blue">青</option>
+            <option value="purple">紫</option>
+          </select>
+          <div class="field-hint">6色から選択</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-scheduled-date">予定日</label>
+          <input id="entry-edit-scheduled-date" name="scheduledDate" type="date" required />
+          <div class="field-hint">予定日を修正</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-actual-date">入出金日</label>
+          <input id="entry-edit-actual-date" name="actualTransactionDate" type="date" />
+          <div class="field-hint">空欄可</div>
+        </div>
+        <div class="field full">
+          <label for="entry-edit-cf-category">CF区分</label>
+          <select id="entry-edit-cf-category" name="cfCategory"></select>
+          <div class="field-hint">入金 / 出金に応じて候補を切り替えます</div>
+        </div>
+        <div class="field full">
+          <label for="entry-edit-note">メモ</label>
+          <input id="entry-edit-note" name="note" maxlength="140" />
+          <div class="field-hint">0-140文字</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-account-name">口座名</label>
+          <select id="entry-edit-account-name" name="accountName">
+            <option value="">未設定</option>
+            <option value="三井住友口座">三井住友口座</option>
+            <option value="和気口座">和気口座</option>
+            <option value="那須口座">那須口座</option>
+          </select>
+          <div class="field-hint">任意</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-customer-name">顧客名</label>
+          <input id="entry-edit-customer-name" name="customerName" maxlength="80" />
+          <div class="field-hint">0-80文字</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-staff-name">担当社員名</label>
+          <input id="entry-edit-staff-name" name="staffName" maxlength="80" />
+          <div class="field-hint">0-80文字</div>
+        </div>
+        <div class="field">
+          <label for="entry-edit-completed">完了状態</label>
+          <select id="entry-edit-completed" name="isCompleted">
+            <option value="0">未完了</option>
+            <option value="1">完了</option>
+          </select>
+          <div class="field-hint">必要に応じて切り替え</div>
+        </div>
+      </div>
+      <div class="entry-edit-actions">
+        <button id="entry-edit-cancel" type="button" class="secondary">キャンセル</button>
+        <button id="entry-edit-save" type="submit" class="primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
   const yearInput = document.getElementById('year');
   const fixedMonth = String(new Date().getMonth() + 1).padStart(2, '0');
@@ -3011,6 +3281,24 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const rakurakuNewCount = document.getElementById('rakuraku-new-count');
   const rakurakuDiffSummary = document.getElementById('rakuraku-diff-summary');
   const rakurakuDiffSelectAll = document.getElementById('rakuraku-diff-select-all');
+  const entryEditModal = document.getElementById('entry-edit-modal');
+  const entryEditForm = document.getElementById('entry-edit-form');
+  const entryEditId = document.getElementById('entry-edit-id');
+  const entryEditTitle = document.getElementById('entry-edit-title');
+  const entryEditAmount = document.getElementById('entry-edit-amount');
+  const entryEditType = document.getElementById('entry-edit-type');
+  const entryEditLabelColor = document.getElementById('entry-edit-label-color');
+  const entryEditScheduledDate = document.getElementById('entry-edit-scheduled-date');
+  const entryEditActualDate = document.getElementById('entry-edit-actual-date');
+  const entryEditCfCategory = document.getElementById('entry-edit-cf-category');
+  const entryEditNote = document.getElementById('entry-edit-note');
+  const entryEditAccountName = document.getElementById('entry-edit-account-name');
+  const entryEditCustomerName = document.getElementById('entry-edit-customer-name');
+  const entryEditStaffName = document.getElementById('entry-edit-staff-name');
+  const entryEditCompleted = document.getElementById('entry-edit-completed');
+  const entryEditCancel = document.getElementById('entry-edit-cancel');
+  const entryEditSave = document.getElementById('entry-edit-save');
+  const entryEditClose = document.getElementById('entry-edit-close');
 
   const toggleAnnualBtn = document.getElementById('toggle-annual');
   const toggleListBtn = document.getElementById('toggle-list');
@@ -3081,6 +3369,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const expandedMgmtIds = new Set();
   let lastCheckedVisibleIndex = -1;
   let isEditMode = false;
+  let editingEntryId = null;
   let editModeHiddenColumnSnapshot = null;
   let isSyncingListScroll = false;
   let visibleStatementFrameEl = statementFrameEl;
@@ -3328,6 +3617,45 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     entryCfCategoryEl.value = nextSelected;
   }
 
+  function syncEntryEditCfCategoryOptions(selectedValue) {
+    if (!entryEditType || !entryEditCfCategory) return;
+    const type = String(entryEditType.value || 'income');
+    const selected = typeof selectedValue === 'string'
+      ? selectedValue
+      : String(entryEditCfCategory.value || '');
+    const options = getCfCategoryOptionsByType(type);
+    const nextSelected = options.includes(selected) ? selected : '';
+    entryEditCfCategory.innerHTML = buildEntryCfCategoryOptionsHtml(nextSelected, type);
+    entryEditCfCategory.value = nextSelected;
+  }
+
+  function showEntryEditModal(entry) {
+    if (!entryEditModal || !entryEditForm) return;
+    editingEntryId = Number(entry.id);
+    if (entryEditId instanceof HTMLInputElement) entryEditId.value = String(entry.id);
+    if (entryEditTitle instanceof HTMLInputElement) entryEditTitle.value = String(entry.title || '');
+    if (entryEditAmount instanceof HTMLInputElement) entryEditAmount.value = String(Number(entry.amount || 0));
+    if (entryEditType instanceof HTMLSelectElement) entryEditType.value = String(entry.type || 'income');
+    if (entryEditLabelColor instanceof HTMLSelectElement) entryEditLabelColor.value = String(entry.label_color || 'blue');
+    if (entryEditScheduledDate instanceof HTMLInputElement) entryEditScheduledDate.value = String(entry.scheduled_date || '');
+    if (entryEditActualDate instanceof HTMLInputElement) entryEditActualDate.value = String(entry.actual_transaction_date || '');
+    if (entryEditNote instanceof HTMLInputElement) entryEditNote.value = String(entry.note || '');
+    if (entryEditAccountName instanceof HTMLSelectElement) entryEditAccountName.value = String(entry.account_name || '');
+    if (entryEditCustomerName instanceof HTMLInputElement) entryEditCustomerName.value = String(entry.customer_name || '');
+    if (entryEditStaffName instanceof HTMLInputElement) entryEditStaffName.value = String(entry.staff_name || '');
+    if (entryEditCompleted instanceof HTMLSelectElement) entryEditCompleted.value = Number(entry.is_completed) === 1 ? '1' : '0';
+    syncEntryEditCfCategoryOptions(String(entry.cf_category || ''));
+    entryEditModal.style.display = 'flex';
+    window.requestAnimationFrame(() => {
+      if (entryEditTitle instanceof HTMLInputElement) entryEditTitle.focus();
+    });
+  }
+
+  function closeEntryEditModal() {
+    if (entryEditModal) entryEditModal.style.display = 'none';
+    editingEntryId = null;
+  }
+
   function loadHiddenListColumns() {
     try {
       const raw = localStorage.getItem(LIST_COLUMN_STORAGE_KEY);
@@ -3535,6 +3863,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       } else {
         hideBanner(statusBanner);
       }
+      return entriesRes.ok;
     } catch (err) {
       console.error('loadAll failed', err);
       if (entries.length === 0) {
@@ -3542,6 +3871,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       } else {
         hideBanner(statusBanner);
       }
+      return false;
     }
   }
 
@@ -3744,6 +4074,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
             '<div class="action-row">' +
               '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
               '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
+              '<button type="button" data-openedit="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>修正</button>' +
               '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
               '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
               buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
@@ -4047,6 +4378,23 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
   }
 
+  function buildEntryEditPayload() {
+    return {
+      title: String(entryEditTitle instanceof HTMLInputElement ? entryEditTitle.value : '').trim(),
+      amount: Number(entryEditAmount instanceof HTMLInputElement ? entryEditAmount.value : 0),
+      type: String(entryEditType instanceof HTMLSelectElement ? entryEditType.value : 'income'),
+      scheduledDate: normalizeDate(String(entryEditScheduledDate instanceof HTMLInputElement ? entryEditScheduledDate.value : '')),
+      note: String(entryEditNote instanceof HTMLInputElement ? entryEditNote.value : '').trim(),
+      accountName: String(entryEditAccountName instanceof HTMLSelectElement ? entryEditAccountName.value : ''),
+      customerName: String(entryEditCustomerName instanceof HTMLInputElement ? entryEditCustomerName.value : '').trim(),
+      staffName: String(entryEditStaffName instanceof HTMLInputElement ? entryEditStaffName.value : '').trim(),
+      labelColor: String(entryEditLabelColor instanceof HTMLSelectElement ? entryEditLabelColor.value : 'blue').trim(),
+      cfCategory: String(entryEditCfCategory instanceof HTMLSelectElement ? entryEditCfCategory.value : '').trim(),
+      actualTransactionDate: normalizeDate(String(entryEditActualDate instanceof HTMLInputElement ? entryEditActualDate.value : '')),
+      isCompleted: String(entryEditCompleted instanceof HTMLSelectElement ? entryEditCompleted.value : '0') === '1'
+    };
+  }
+
   rowsEl.addEventListener('click', (ev) => {
     const checkbox = ev.target instanceof Element
       ? ev.target.closest('input[type="checkbox"][data-select-id]')
@@ -4099,6 +4447,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
     if (btn.dataset.editactualdate) {
       editEntryActualDate(id);
+      return;
+    }
+    if (btn.dataset.openedit) {
+      const target = entries.find((e) => e.id === id);
+      if (target) showEntryEditModal(target);
       return;
     }
     const dir = String(btn.dataset.move || '');
@@ -4161,6 +4514,49 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     } catch (_) {
       showBanner(statusBanner, 'error', '色ラベル更新中に通信エラーが発生しました。');
       target.value = previousLabelColor;
+    }
+  });
+
+  entryEditType?.addEventListener('change', () => {
+    syncEntryEditCfCategoryOptions();
+  });
+  entryEditCancel?.addEventListener('click', () => {
+    closeEntryEditModal();
+  });
+  entryEditClose?.addEventListener('click', () => {
+    closeEntryEditModal();
+  });
+  entryEditModal?.addEventListener('click', (ev) => {
+    if (ev.target === entryEditModal) closeEntryEditModal();
+  });
+  entryEditForm?.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    if (!(entryEditSave instanceof HTMLButtonElement)) return;
+    const id = Number(entryEditId instanceof HTMLInputElement ? entryEditId.value : editingEntryId || 0);
+    if (!Number.isInteger(id) || id <= 0) return;
+    const payload = buildEntryEditPayload();
+    entryEditSave.disabled = true;
+    try {
+      const res = await fetch('/api/entries/' + encodeURIComponent(String(id)), {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const rawBody = await res.text();
+      const parsed = safeJsonParse(rawBody) || {};
+      if (!res.ok) {
+        showBanner(statusBanner, 'error', buildApiErrorMessage(parsed, rawBody, '予定の更新に失敗しました。'));
+        return;
+      }
+      closeEntryEditModal();
+      const refreshed = await loadAll();
+      if (refreshed) {
+        showBanner(statusBanner, 'ok', '予定を更新しました。');
+      }
+    } catch (_) {
+      showBanner(statusBanner, 'error', '予定更新中に通信エラーが発生しました。');
+    } finally {
+      entryEditSave.disabled = false;
     }
   });
 

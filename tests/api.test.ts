@@ -456,6 +456,80 @@ describe('entries api', () => {
     expect(moved).toMatchObject({ id, scheduled_date: '2026-05-03' });
   });
 
+  it('updates an entry through the row edit api', async () => {
+    const cookie = await createAuthedCookie();
+
+    await createEntry(cookie, {
+      title: 'Edit target',
+      amount: 5000,
+      type: 'income',
+      scheduledDate: '2026-04-10',
+      note: 'before',
+      labelColor: 'blue'
+    });
+
+    const listBefore = await fetchApp('/api/entries?year=2026', { headers: { cookie } });
+    const beforePayload = await listBefore.json<{ entries: Array<{ id: number }> }>();
+    const id = beforePayload.entries[0]?.id;
+    expect(id).toBeTypeOf('number');
+
+    const updateRes = await fetchApp(`/api/entries/${id}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        cookie
+      },
+      body: JSON.stringify({
+        title: 'Edit updated',
+        amount: 8800,
+        type: 'expense',
+        scheduledDate: '2026-05-12',
+        note: 'after',
+        accountName: '三井住友口座',
+        customerName: '顧客A',
+        staffName: '担当B',
+        labelColor: 'green',
+        cfCategory: '人件費支出',
+        actualTransactionDate: '2026-05-13',
+        isCompleted: true
+      })
+    });
+    expect(updateRes.status).toBe(200);
+
+    const listRes = await fetchApp('/api/entries?year=2026', { headers: { cookie } });
+    const payload = await listRes.json<{ entries: Array<{
+      id: number;
+      title: string;
+      amount: number;
+      type: string;
+      scheduled_date: string;
+      note: string | null;
+      account_name: string | null;
+      actual_transaction_date: string | null;
+      customer_name: string | null;
+      staff_name: string | null;
+      label_color: string | null;
+      cf_category: string | null;
+      is_completed: number;
+    }> }>();
+    const updated = payload.entries.find((entry) => entry.id === id);
+    expect(updated).toMatchObject({
+      id,
+      title: 'Edit updated',
+      amount: 8800,
+      type: 'expense',
+      scheduled_date: '2026-05-12',
+      note: 'after',
+      account_name: '三井住友口座',
+      actual_transaction_date: '2026-05-13',
+      customer_name: '顧客A',
+      staff_name: '担当B',
+      label_color: 'green',
+      cf_category: '人件費支出',
+      is_completed: 1
+    });
+  });
+
   it('excludes soft-deleted entries from entries and summary totals', async () => {
     const cookie = await createAuthedCookie();
 
