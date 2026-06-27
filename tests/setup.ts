@@ -44,6 +44,7 @@ const setupStatements = [
     user_id INTEGER NOT NULL,
     organization_id INTEGER,
     title TEXT NOT NULL,
+    content TEXT,
     amount INTEGER NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
     scheduled_date TEXT NOT NULL,
@@ -120,7 +121,7 @@ const setupStatements = [
   `CREATE INDEX IF NOT EXISTS idx_prt_token_validity
    ON password_reset_tokens(token_hash, used_at, expires_at)`,
   `CREATE TRIGGER IF NOT EXISTS trg_entries_touch_updated_at
-   AFTER UPDATE OF title, amount, type, scheduled_date, order_index, note, deleted_at ON cashflow_entries
+   AFTER UPDATE OF title, content, amount, type, scheduled_date, order_index, note, deleted_at, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, import_source_file_name, import_management_no, import_batch_id, organization_id, is_sample, is_completed, created_by_user_id ON cashflow_entries
    FOR EACH ROW
    WHEN NEW.updated_at = OLD.updated_at
    BEGIN
@@ -143,11 +144,24 @@ const setupStatements = [
          'user_id', NEW.user_id,
          'organization_id', NEW.organization_id,
          'title', NEW.title,
+         'content', NEW.content,
          'amount', NEW.amount,
          'type', NEW.type,
          'scheduled_date', NEW.scheduled_date,
          'order_index', NEW.order_index,
          'note', NEW.note,
+         'account_name', NEW.account_name,
+         'actual_transaction_date', NEW.actual_transaction_date,
+         'customer_name', NEW.customer_name,
+         'staff_name', NEW.staff_name,
+         'label_color', NEW.label_color,
+         'cf_category', NEW.cf_category,
+         'import_source_file_name', NEW.import_source_file_name,
+         'import_management_no', NEW.import_management_no,
+         'import_batch_id', NEW.import_batch_id,
+         'is_sample', NEW.is_sample,
+         'is_completed', NEW.is_completed,
+         'created_by_user_id', NEW.created_by_user_id,
          'created_at', NEW.created_at,
          'updated_at', NEW.updated_at,
          'deleted_at', NEW.deleted_at
@@ -169,11 +183,24 @@ const setupStatements = [
          'user_id', NEW.user_id,
          'organization_id', NEW.organization_id,
          'title', NEW.title,
+         'content', NEW.content,
          'amount', NEW.amount,
          'type', NEW.type,
          'scheduled_date', NEW.scheduled_date,
          'order_index', NEW.order_index,
          'note', NEW.note,
+         'account_name', NEW.account_name,
+         'actual_transaction_date', NEW.actual_transaction_date,
+         'customer_name', NEW.customer_name,
+         'staff_name', NEW.staff_name,
+         'label_color', NEW.label_color,
+         'cf_category', NEW.cf_category,
+         'import_source_file_name', NEW.import_source_file_name,
+         'import_management_no', NEW.import_management_no,
+         'import_batch_id', NEW.import_batch_id,
+         'is_sample', NEW.is_sample,
+         'is_completed', NEW.is_completed,
+         'created_by_user_id', NEW.created_by_user_id,
          'created_at', NEW.created_at,
          'updated_at', NEW.updated_at,
          'deleted_at', NEW.deleted_at

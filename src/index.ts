@@ -56,6 +56,7 @@ type CashflowImportParsedRow = {
   scheduledDate: string;
   type: 'income' | 'expense';
   title: string;
+  content: string;
   amount: number;
   note: string;
   actualDate: string;
@@ -70,6 +71,7 @@ type CashflowImportParsedRow = {
 type CashflowImportPreviewNewEntry = {
   rowNumber: number;
   title: string;
+  content: string;
   amount: number;
   type: 'income' | 'expense';
   scheduledDate: string;
@@ -85,6 +87,7 @@ type CashflowImportPreviewNewEntry = {
 type CashflowImportPreviewUpdateEntry = CashflowImportPreviewNewEntry & {
   id: number;
   titleOld: string;
+  contentOld: string;
   amountOld: number;
   typeOld: 'income' | 'expense';
   scheduledDateOld: string;
@@ -107,6 +110,7 @@ const SESSION_TTL_DAYS = 14;
 const SESSION_REFRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
 const RESET_TOKEN_TTL_MINUTES = 30;
 const MAX_TITLE_LENGTH = 120;
+const MAX_CONTENT_LENGTH = 140;
 const MAX_NOTE_LENGTH = 500;
 const MIN_AMOUNT = 1;
 const MAX_AMOUNT = 1_000_000_000;
@@ -117,14 +121,18 @@ const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_BLOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
 const REGISTRATION_ENABLED = false;
-const ENTRY_LABEL_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
+const ENTRY_LABEL_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'brown', 'pink', 'gray', 'lightblue'] as const;
 const ENTRY_LABEL_COLOR_LABELS: Record<(typeof ENTRY_LABEL_COLORS)[number], string> = {
   red: '赤',
   orange: '橙',
   yellow: '黄',
   green: '緑',
   blue: '青',
-  purple: '紫'
+  purple: '紫',
+  brown: '茶',
+  pink: '桃',
+  gray: '灰',
+  lightblue: '水'
 };
 const CF_CATEGORIES = [
   '',
@@ -1046,7 +1054,7 @@ app.get('/api/entries', async (c) => {
   if (!year) return c.json({ error: 'Invalid year. Use YYYY.' }, 400);
 
   const result = await c.env.DB.prepare(
-    `SELECT id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no
+    `SELECT id, title, content, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no
      FROM cashflow_entries
      WHERE organization_id = ? AND substr(scheduled_date, 1, 4) = ? AND deleted_at IS NULL
      ORDER BY scheduled_date ASC, order_index ASC, id ASC`
@@ -1123,6 +1131,7 @@ app.post('/api/entries', async (c) => {
 
   const body = await parseJsonBody<{
     title?: string;
+    content?: string;
     amount?: number;
     type?: 'income' | 'expense';
     scheduledDate?: string;
@@ -1136,6 +1145,7 @@ app.post('/api/entries', async (c) => {
   if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
 
   const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const content = typeof body.content === 'string' ? body.content.trim() : '';
   const note = typeof body.note === 'string' ? body.note.trim() : '';
   const accountName = typeof body.accountName === 'string' ? body.accountName.trim() : '';
   const customerName = typeof body.customerName === 'string' ? body.customerName.trim() : '';
@@ -1146,6 +1156,7 @@ app.post('/api/entries', async (c) => {
 
   const validatedInput = {
     title,
+    content,
     note,
     amount: body.amount,
     type: body.type,
@@ -1173,13 +1184,14 @@ app.post('/api/entries', async (c) => {
 
   await c.env.DB.prepare(
     `INSERT INTO cashflow_entries
-      (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, created_by_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      (user_id, organization_id, title, content, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, created_by_user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
   )
     .bind(
       user.id,
       organizationId,
       validatedInput.title,
+      validatedInput.content || null,
       validatedInput.amount,
       validatedInput.type,
       validatedInput.scheduledDate,
@@ -1199,6 +1211,7 @@ app.post('/api/entries', async (c) => {
      VALUES (?, 'add', 'cashflow_entry', ?)`
   ).bind(user.id, JSON.stringify({
     title: validatedInput.title,
+    content: validatedInput.content,
     amount: validatedInput.amount,
     type: validatedInput.type,
     scheduledDate: validatedInput.scheduledDate
@@ -1660,6 +1673,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
     const existingById = new Map<number, {
       id: number;
       title: string;
+      content: string | null;
       amount: number;
       type: 'income' | 'expense';
       scheduled_date: string;
@@ -1675,6 +1689,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
     const existingByKey = new Map<string, {
       id: number;
       title: string;
+      content: string | null;
       amount: number;
       type: 'income' | 'expense';
       scheduled_date: string;
@@ -1694,12 +1709,13 @@ app.post('/api/import/cashflow/preview', async (c) => {
         const chunk = monthList.slice(i, i + monthChunkSize);
         const monthPlaceholders = chunk.map(() => '?').join(', ');
         const rows = await c.env.DB.prepare(
-          `SELECT id, title, amount, type, scheduled_date, note, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_completed, import_management_no
+          `SELECT id, title, content, amount, type, scheduled_date, note, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_completed, import_management_no
            FROM cashflow_entries
            WHERE organization_id = ? AND deleted_at IS NULL AND substr(scheduled_date, 1, 7) IN (${monthPlaceholders})`
         ).bind(organizationId, ...chunk).all<{
           id: number;
           title: string;
+          content: string | null;
           amount: number;
           type: 'income' | 'expense';
           scheduled_date: string;
@@ -1716,6 +1732,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
           const existing = {
             id: Number(row.id),
             title: row.title || '',
+            content: row.content || '',
             amount: Number(row.amount || 0),
             type: row.type,
             scheduled_date: row.scheduled_date || '',
@@ -1733,6 +1750,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
             scheduledDate: existing.scheduled_date,
             type: existing.type,
             title: existing.title,
+            content: existing.content || '',
             amount: existing.amount,
             note: existing.note || '',
             actualDate: existing.actual_transaction_date || '',
@@ -1767,6 +1785,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
         scheduledDate: row.scheduledDate,
         type: row.type,
         title: row.title,
+        content: row.content,
         amount: row.amount,
         note: row.note || '',
         actualDate: row.actualDate || '',
@@ -1783,6 +1802,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
           scheduledDate: row.scheduledDate,
           type: row.type,
           title: row.title,
+          content: row.content,
           amount: row.amount,
           note: row.note || '',
           actualDate: row.actualDate || '',
@@ -1796,6 +1816,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
           scheduledDate: existing.scheduled_date,
           type: existing.type,
           title: existing.title,
+          content: existing.content || '',
           amount: existing.amount,
           note: existing.note || '',
           actualDate: existing.actual_transaction_date || '',
@@ -1811,6 +1832,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
           rowNumber: row.rowNumber,
           id: existing.id,
           title: row.title,
+          content: row.content,
           amount: row.amount,
           type: row.type,
           scheduledDate: row.scheduledDate,
@@ -1823,6 +1845,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
           isCompleted: row.isCompleted,
           managementNo: row.managementNo,
           titleOld: existing.title,
+          contentOld: existing.content || '',
           amountOld: existing.amount,
           typeOld: existing.type,
           scheduledDateOld: existing.scheduled_date,
@@ -1840,6 +1863,7 @@ app.post('/api/import/cashflow/preview', async (c) => {
         newEntries.push({
           rowNumber: row.rowNumber,
           title: row.title,
+          content: row.content,
           amount: row.amount,
           type: row.type,
           scheduledDate: row.scheduledDate,
@@ -1942,12 +1966,13 @@ app.post('/api/import/cashflow/commit', async (c) => {
       statements.push(
         c.env.DB.prepare(
           `UPDATE cashflow_entries
-           SET title = ?, amount = ?, type = ?, scheduled_date = ?, note = ?, actual_transaction_date = ?,
+           SET title = ?, content = ?, amount = ?, type = ?, scheduled_date = ?, note = ?, actual_transaction_date = ?,
                customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?,
                is_completed = ?, import_management_no = ?, updated_at = datetime('now')
            WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
         ).bind(
           row.title,
+          row.content || null,
           row.amount,
           row.type,
           row.scheduledDate,
@@ -1976,13 +2001,14 @@ app.post('/api/import/cashflow/commit', async (c) => {
       statements.push(
         c.env.DB.prepare(
           `INSERT INTO cashflow_entries
-            (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
+            (user_id, organization_id, title, content, amount, type, scheduled_date, order_index, note, account_name,
              actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
         ).bind(
           user.id,
           organizationId,
           row.title,
+          row.content || null,
           row.amount,
           row.type,
           row.scheduledDate,
@@ -2089,6 +2115,7 @@ app.post('/api/import/cashflow', async (c) => {
       type: header.indexOf('区分'),
       cfCategory: header.indexOf('CF区分'),
       title: header.indexOf('件名'),
+      content: header.indexOf('内容'),
       amount: header.indexOf('金額'),
       note: header.indexOf('メモ'),
       actualDate: header.indexOf('入出金日'),
@@ -2109,6 +2136,7 @@ app.post('/api/import/cashflow', async (c) => {
       scheduledDate: string;
       type: 'income' | 'expense';
       title: string;
+      content: string;
       amount: number;
       note: string;
       actualDate: string;
@@ -2132,6 +2160,7 @@ app.post('/api/import/cashflow', async (c) => {
       const rawScheduledDate = String(cols[idx.scheduledDate] ?? '').trim();
       const rawType = String(cols[idx.type] ?? '').trim();
       const rawTitle = String(cols[idx.title] ?? '').trim();
+      const rawContent = idx.content >= 0 ? String(cols[idx.content] ?? '').trim() : '';
       const rawAmountVal = String(cols[idx.amount] ?? '').replaceAll(',', '').trim();
       const rawAmount = Number(rawAmountVal);
       const rawNote = idx.note >= 0 ? String(cols[idx.note] ?? '').trim() : '';
@@ -2180,6 +2209,7 @@ app.post('/api/import/cashflow', async (c) => {
         scheduledDate,
         type,
         title: rawTitle.slice(0, 120),
+        content: rawContent.slice(0, MAX_CONTENT_LENGTH),
         amount: rawAmount,
         note: rawNote || '',
         actualDate: actualDate || '',
@@ -2257,7 +2287,7 @@ app.post('/api/import/cashflow', async (c) => {
         statements.push(
           c.env.DB.prepare(
             `UPDATE cashflow_entries
-             SET scheduled_date = ?, type = ?, title = ?, amount = ?, note = ?, actual_transaction_date = ?,
+             SET scheduled_date = ?, type = ?, title = ?, content = ?, amount = ?, note = ?, actual_transaction_date = ?,
                  customer_name = ?, staff_name = ?, is_completed = ?, label_color = ?,
                  cf_category = CASE WHEN ? = 1 THEN ? ELSE cf_category END,
                  import_management_no = ?,
@@ -2267,6 +2297,7 @@ app.post('/api/import/cashflow', async (c) => {
             row.scheduledDate,
             row.type,
             row.title,
+            row.content || null,
             row.amount,
             row.note || null,
             row.actualDate || null,
@@ -2292,13 +2323,14 @@ app.post('/api/import/cashflow', async (c) => {
         statements.push(
           c.env.DB.prepare(
             `INSERT INTO cashflow_entries
-              (user_id, organization_id, title, amount, type, scheduled_date, order_index, note, account_name,
+              (user_id, organization_id, title, content, amount, type, scheduled_date, order_index, note, account_name,
                actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?)`
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?)`
           ).bind(
             user.id,
             organizationId,
             row.title,
+            row.content || null,
             row.amount,
             row.type,
             row.scheduledDate,
@@ -2778,6 +2810,7 @@ app.patch('/api/entries/:id', async (c) => {
 
   const body = await parseJsonBody<{
     title?: string;
+    content?: string;
     amount?: unknown;
     type?: 'income' | 'expense';
     scheduledDate?: string;
@@ -2794,6 +2827,7 @@ app.patch('/api/entries/:id', async (c) => {
   if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
 
   const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const content = typeof body.content === 'string' ? body.content.trim() : '';
   const note = typeof body.note === 'string' ? body.note.trim() : '';
   const accountName = typeof body.accountName === 'string' ? body.accountName.trim() : '';
   const customerName = typeof body.customerName === 'string' ? body.customerName.trim() : '';
@@ -2815,6 +2849,7 @@ app.patch('/api/entries/:id', async (c) => {
   }
   if (!scheduledDate || type === '' || !isValidEntryInput({
     title,
+    content,
     note,
     amount,
     type,
@@ -2829,7 +2864,7 @@ app.patch('/api/entries/:id', async (c) => {
   }
 
   const existing = await c.env.DB.prepare(
-    `SELECT scheduled_date, order_index, title, amount, type, is_completed
+    `SELECT scheduled_date, order_index, title, content, amount, type, is_completed
      FROM cashflow_entries
      WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
   )
@@ -2838,6 +2873,7 @@ app.patch('/api/entries/:id', async (c) => {
       scheduled_date: string;
       order_index: number;
       title: string;
+      content: string | null;
       amount: number;
       type: 'income' | 'expense';
       is_completed: number;
@@ -2860,11 +2896,12 @@ app.patch('/api/entries/:id', async (c) => {
 
   const result = await c.env.DB.prepare(
     `UPDATE cashflow_entries
-     SET title = ?, amount = ?, type = ?, scheduled_date = ?, order_index = ?, note = ?, account_name = ?, actual_transaction_date = ?, customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?, import_management_no = ?, is_completed = ?, updated_at = datetime('now')
+     SET title = ?, content = ?, amount = ?, type = ?, scheduled_date = ?, order_index = ?, note = ?, account_name = ?, actual_transaction_date = ?, customer_name = ?, staff_name = ?, label_color = ?, cf_category = ?, import_management_no = ?, is_completed = ?, updated_at = datetime('now')
      WHERE id = ? AND organization_id = ? AND deleted_at IS NULL`
   )
     .bind(
       title,
+      content || null,
       amount,
       type,
       scheduledDate,
@@ -2892,6 +2929,8 @@ app.patch('/api/entries/:id', async (c) => {
     scheduledDateTo: scheduledDate,
     titleFrom: existing.title,
     titleTo: title,
+    contentFrom: existing.content || '',
+    contentTo: content,
     amountFrom: Number(existing.amount ?? 0),
     amountTo: amount,
     typeFrom: existing.type,
@@ -2905,6 +2944,7 @@ app.patch('/api/entries/:id', async (c) => {
     entry: {
       id,
       title,
+      content: content || null,
       amount,
       type,
       scheduled_date: scheduledDate,
@@ -2929,10 +2969,12 @@ app.post('/api/entries/bulk', async (c) => {
 
   const body = await parseJsonBody<{
     ids?: number[];
-    action?: 'set_date' | 'set_actual_date' | 'set_completed';
+    action?: 'set_date' | 'set_actual_date' | 'set_completed' | 'set_cf_category' | 'set_label_color';
     scheduledDate?: string;
     actualTransactionDate?: string | null;
     isCompleted?: boolean;
+    cfCategory?: string;
+    labelColor?: string;
   }>(c);
   if (!body) return c.json({ error: 'Invalid JSON body' }, 400);
 
@@ -2941,7 +2983,7 @@ app.post('/api/entries/bulk', async (c) => {
   if (normalizedIds.length === 0 || normalizedIds.length > 500) {
     return c.json({ error: 'Invalid ids. Use 1..500 integer ids.' }, 400);
   }
-  if (!body.action || !['set_date', 'set_actual_date', 'set_completed'].includes(body.action)) {
+  if (!body.action || !['set_date', 'set_actual_date', 'set_completed', 'set_cf_category', 'set_label_color'].includes(body.action)) {
     return c.json({ error: 'Invalid action' }, 400);
   }
 
@@ -3009,6 +3051,64 @@ app.post('/api/entries/bulk', async (c) => {
        VALUES (?, 'edit', 'cashflow_entry_bulk_actual_date', ?)`
     ).bind(user.id, JSON.stringify({ ids: normalizedIds, actualTransactionDate })).run();
     return c.json({ ok: true, affected });
+  }
+
+  if (body.action === 'set_cf_category') {
+    const entryTypeRows = await c.env.DB.prepare(
+      `SELECT DISTINCT type
+       FROM cashflow_entries
+       WHERE organization_id = ? AND deleted_at IS NULL AND id IN (${normalizedIds.map(() => '?').join(', ')})`
+    ).bind(organizationId, ...normalizedIds).all<{ type: 'income' | 'expense' }>();
+    const types = [...new Set((entryTypeRows.results ?? []).map((row) => row.type))];
+    if (types.length !== 1) {
+      return c.json({ error: 'Selected entries must all have the same type.' }, 400);
+    }
+    const entryType = types[0];
+    const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
+    const allowedCategories = new Set<string>(['', ...getCfCategoriesByEntryType(entryType)]);
+    if (!allowedCategories.has(cfCategory)) {
+      return c.json({ error: 'Invalid cf category' }, 400);
+    }
+    let affected = 0;
+    for (let i = 0; i < normalizedIds.length; i += chunkSize) {
+      const chunk = normalizedIds.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const result = await c.env.DB.prepare(
+        `UPDATE cashflow_entries
+         SET cf_category = ?, updated_at = datetime('now')
+         WHERE organization_id = ? AND deleted_at IS NULL AND id IN (${placeholders})`
+      ).bind(cfCategory, organizationId, ...chunk).run();
+      affected += Number(result.meta.changes ?? 0);
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO user_operation_logs (user_id, action_type, target_type, detail)
+       VALUES (?, 'edit', 'cashflow_entry_bulk_cf_category', ?)`
+    ).bind(user.id, JSON.stringify({ ids: normalizedIds, type: entryType, cf_category: cfCategory })).run();
+    return c.json({ ok: true, affected, type: entryType, cfCategory });
+  }
+
+  if (body.action === 'set_label_color') {
+    const labelColor = typeof body.labelColor === 'string' ? body.labelColor.trim() : '';
+    const allowedColors = new Set<string>(ENTRY_LABEL_COLORS);
+    if (!allowedColors.has(labelColor)) {
+      return c.json({ error: 'Invalid color' }, 400);
+    }
+    let affected = 0;
+    for (let i = 0; i < normalizedIds.length; i += chunkSize) {
+      const chunk = normalizedIds.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const result = await c.env.DB.prepare(
+        `UPDATE cashflow_entries
+         SET label_color = ?, updated_at = datetime('now')
+         WHERE organization_id = ? AND deleted_at IS NULL AND id IN (${placeholders})`
+      ).bind(labelColor, organizationId, ...chunk).run();
+      affected += Number(result.meta.changes ?? 0);
+    }
+    await c.env.DB.prepare(
+      `INSERT INTO user_operation_logs (user_id, action_type, target_type, detail)
+       VALUES (?, 'edit', 'cashflow_entry_bulk_label_color', ?)`
+    ).bind(user.id, JSON.stringify({ ids: normalizedIds, label_color: labelColor })).run();
+    return c.json({ ok: true, affected, labelColor });
   }
 
   if (typeof body.isCompleted !== 'boolean') {
@@ -3118,14 +3218,6 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .brand { min-width: 0; }
     .brand-title { font-size: 20px; font-weight: 700; letter-spacing: .02em; }
     .brand-user { font-size: 12px; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .summary { display: grid; grid-template-columns: repeat(3, minmax(110px, 1fr)); gap: 8px; }
-    .sum-card { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.22); border-radius: 10px; padding: 10px 12px; }
-    .sum-label { display: block; font-size: 11px; opacity: .9; margin-bottom: 4px; }
-    .sum-value { font-size: 18px; font-weight: 700; letter-spacing: .01em; }
-    .sum-value.income { color: #b8ffd4; }
-    .sum-value.expense { color: #ffd6da; }
-    .sum-value.balance.plus { color: #b8ffd4; }
-    .sum-value.balance.minus { color: #ffd6da; }
     .header-warning-slot { max-width: 1800px; margin: 8px auto 0; padding: 0 20px; min-height: 34px; }
     .balance-alert { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease, transform .15s ease; font-size: 12px; font-weight: 700; color: #7a5300; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 8px 10px; pointer-events: none; }
     .balance-alert.show { opacity: 1; transform: translateY(0); }
@@ -3137,6 +3229,25 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .main { max-width: 1800px; margin: 18px auto; padding: 0 20px 40px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 0 rgba(15, 47, 74, 0.04); }
     .topline { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    .annual-topline-meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+    .annual-metric {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid #d7e0ea;
+      border-radius: 999px;
+      background: #f8fbff;
+      font-size: 12px;
+      color: #48617a;
+    }
+    .annual-metric strong {
+      color: #1f2937;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+    }
+    .annual-metric strong.plus { color: var(--income); }
+    .annual-metric strong.minus { color: var(--expense); }
     .section-toggle { border: 1px solid var(--line); background: #fff; color: var(--text); padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
     .collapsed { display: none; }
     .muted { color: var(--muted); font-size: 12px; }
@@ -3210,12 +3321,14 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     #rows td:nth-child(4) { white-space: nowrap; min-width: 110px; }
     #rows th:nth-child(5),
     #rows td:nth-child(5) { white-space: nowrap; min-width: 72px; }
-    #rows th:nth-child(9),
-    #rows td:nth-child(9) { white-space: nowrap; min-width: 110px; }
-    #rows th:nth-child(13),
-    #rows td:nth-child(13) { white-space: nowrap; min-width: 120px; }
+    #rows th:nth-child(8),
+    #rows td:nth-child(8) { min-width: 180px; }
+    #rows th:nth-child(10),
+    #rows td:nth-child(10) { white-space: nowrap; min-width: 110px; }
     #rows th:nth-child(14),
-    #rows td:nth-child(14) { white-space: nowrap; min-width: 210px; }
+    #rows td:nth-child(14) { white-space: nowrap; min-width: 120px; }
+    #rows th:nth-child(15),
+    #rows td:nth-child(15) { white-space: nowrap; min-width: 210px; }
     .actions { display: flex; flex-direction: column; gap: 4px; min-width: 210px; }
     .select-cell { text-align: center; width: 52px; }
     .toggle-cell { text-align: center; width: 42px; }
@@ -3238,6 +3351,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .label-green { background: #22c55e; }
     .label-blue { background: #3b82f6; }
     .label-purple { background: #a855f7; }
+    .label-brown { background: #8b5e3c; }
+    .label-pink { background: #ec4899; }
+    .label-gray { background: #94a3b8; }
+    .label-lightblue { background: #38bdf8; }
     .workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
     .workspace.is-edit-mode { grid-template-columns: minmax(0, 1.08fr) minmax(460px, .92fr); align-items: start; }
     .workspace-left { min-width: 0; }
@@ -3587,20 +3704,6 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       <div class="brand-title">Cashflow Manager</div>
       <div class="brand-user" title="${escapeHtml(email)}">${escapeHtml(email)}</div>
     </div>
-    <div class="summary" aria-live="polite">
-      <div class="sum-card">
-        <span class="sum-label">入金予定</span>
-        <span class="sum-value income" id="sum-income">0</span>
-      </div>
-      <div class="sum-card">
-        <span class="sum-label">出金予定</span>
-        <span class="sum-value expense" id="sum-expense">0</span>
-      </div>
-      <div class="sum-card">
-        <span class="sum-label">差引</span>
-        <span class="sum-value balance" id="sum-balance">0</span>
-      </div>
-    </div>
     <div style="display:flex; gap:8px; align-items:center;">
       <a href="/cashflow-statement" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">資金繰り表</a>
       <button id="edit-mode-toggle" type="button" class="secondary" style="display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; min-width:110px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; background:rgba(255,255,255,.12); font-size:13px; cursor:pointer; position:relative; z-index:30; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent;">編集モード</button>
@@ -3662,6 +3765,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     <div class="topline">
       <strong>年間入出金データ（明細）</strong>
       <span class="muted">選択中の年の完了済み入出金データを表示します。残高は0起点で計算します。</span>
+      <div class="annual-topline-meta" aria-live="polite">
+        <span class="annual-metric">本日 <strong id="annual-today-date">-</strong></span>
+        <span class="annual-metric">本日時点残高 <strong id="annual-today-balance">¥0</strong></span>
+      </div>
       <button id="toggle-annual" class="section-toggle" type="button">展開する</button>
     </div>
     <div id="annual-section-body" class="table-wrap collapsed">
@@ -3687,6 +3794,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         <input id="f-title" name="title" placeholder="例: A社売上入金" required maxlength="80" />
         <div class="field-hint" data-hint-for="title">1-80文字</div>
       </div>
+      <div class="field" data-form-field="content">
+        <label for="f-content">内容</label>
+        <input id="f-content" name="content" placeholder="任意" maxlength="140" />
+        <div class="field-hint" data-hint-for="content">0-140文字</div>
+      </div>
       <div class="field" data-form-field="amount">
         <label for="f-amount">金額</label>
         <input id="f-amount" name="amount" type="number" step="1" min="1" placeholder="例: 120000" required />
@@ -3706,8 +3818,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
           <option value="green">緑</option>
           <option value="blue">青</option>
           <option value="purple">紫</option>
+          <option value="brown">茶</option>
+          <option value="pink">桃</option>
+          <option value="gray">灰</option>
+          <option value="lightblue">水</option>
         </select>
-        <div class="field-hint" data-hint-for="labelColor">6色から選択</div>
+        <div class="field-hint" data-hint-for="labelColor">10色から選択</div>
       </div>
       <div class="field" data-form-field="scheduledDate">
         <label for="f-date">予定日</label>
@@ -3754,7 +3870,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       </div>
     </div>
     <div class="toolbar" style="margin-bottom:10px;">
-      <input id="list-filter-keyword" type="search" placeholder="件名・メモ・口座名・顧客名・担当社員名で検索" style="min-width:320px;" />
+      <input id="list-filter-keyword" type="search" placeholder="件名・内容・メモ・口座名・顧客名・担当社員名で検索" style="min-width:320px;" />
       <select id="list-filter-month" aria-label="月絞り込み">
         <option value="all">月: すべて</option>
       </select>
@@ -3776,6 +3892,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         <option value="green">ラベル: 緑</option>
         <option value="blue">ラベル: 青</option>
         <option value="purple">ラベル: 紫</option>
+        <option value="brown">ラベル: 茶</option>
+        <option value="pink">ラベル: 桃</option>
+        <option value="gray">ラベル: 灰</option>
+        <option value="lightblue">ラベル: 水</option>
       </select>
       <button id="list-filter-reset" type="button">絞り込み解除</button>
       <button id="export-csv" class="secondary" type="button">CSV出力</button>
@@ -3790,6 +3910,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       <div class="column-toggle-group">
         <button type="button" class="column-toggle" data-list-col-toggle="label">ラベル</button>
         <button type="button" class="column-toggle" data-list-col-toggle="cf_category">CF区分</button>
+        <button type="button" class="column-toggle" data-list-col-toggle="content">内容</button>
         <button type="button" class="column-toggle" data-list-col-toggle="note">メモ</button>
         <button type="button" class="column-toggle" data-list-col-toggle="actual_date">入出金日</button>
         <button type="button" class="column-toggle" data-list-col-toggle="customer_name">顧客名</button>
@@ -3805,6 +3926,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       <button id="bulk-clear-selection" type="button">選択解除</button>
       <button id="bulk-edit-date" type="button">一括で日付変更</button>
       <button id="bulk-edit-actual-date" type="button">一括で確定日変更</button>
+      <button id="bulk-edit-cf-category" type="button">一括でCF区分設定</button>
+      <button id="bulk-edit-color" type="button">一括で色設定</button>
       <button id="bulk-complete" type="button">一括で完了</button>
       <button id="bulk-uncomplete" type="button">一括で未完了</button>
       <span id="bulk-selection-caption" class="muted">選択 0 件</span>
@@ -3814,7 +3937,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     </div>
     <div id="list-section-body" class="table-wrap">
       <table>
-        <thead><tr><th data-list-col="toggle"></th><th data-list-col="index">#</th><th data-list-col="label">ラベル</th><th data-list-col="scheduled_date">予定日</th><th data-list-col="type">区分</th><th data-list-col="cf_category">CF区分</th><th data-list-col="title">件名</th><th data-list-col="amount">金額</th><th data-list-col="note">メモ</th><th data-list-col="actual_date">入出金日</th><th data-list-col="customer_name">顧客名</th><th data-list-col="staff_name">担当</th><th data-list-col="running">残高</th><th data-list-col="actions">操作</th><th data-list-col="select">選択</th></tr></thead>
+        <thead><tr><th data-list-col="toggle"></th><th data-list-col="index">#</th><th data-list-col="label">ラベル</th><th data-list-col="scheduled_date">予定日</th><th data-list-col="type">区分</th><th data-list-col="cf_category">CF区分</th><th data-list-col="title">件名</th><th data-list-col="content">内容</th><th data-list-col="amount">金額</th><th data-list-col="note">メモ</th><th data-list-col="actual_date">入出金日</th><th data-list-col="customer_name">顧客名</th><th data-list-col="staff_name">担当</th><th data-list-col="running">残高</th><th data-list-col="actions">操作</th><th data-list-col="select">選択</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -4018,6 +4141,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
           <div class="field-hint">1-120文字</div>
         </div>
         <div class="field">
+          <label for="entry-edit-content">内容</label>
+          <input id="entry-edit-content" name="content" maxlength="140" />
+          <div class="field-hint">0-140文字</div>
+        </div>
+        <div class="field">
           <label for="entry-edit-amount">金額</label>
           <input id="entry-edit-amount" name="amount" type="number" step="1" min="1" required />
           <div class="field-hint">1円以上の整数</div>
@@ -4039,8 +4167,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
             <option value="green">緑</option>
             <option value="blue">青</option>
             <option value="purple">紫</option>
+            <option value="brown">茶</option>
+            <option value="pink">桃</option>
+            <option value="gray">灰</option>
+            <option value="lightblue">水</option>
           </select>
-          <div class="field-hint">6色から選択</div>
+          <div class="field-hint">10色から選択</div>
         </div>
         <div class="field">
           <label for="entry-edit-scheduled-date">予定日</label>
@@ -4104,6 +4236,40 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   </div>
 </div>
 
+<div id="bulk-cf-category-modal" class="modal-overlay">
+  <div class="modal-box" style="max-width: 520px; width: 94%;">
+    <span id="bulk-cf-category-close" class="modal-close">&times;</span>
+    <h3 style="margin-top:0;">CF区分の一括設定</h3>
+    <p id="bulk-cf-category-summary" style="font-size:13px; color:var(--muted); margin-bottom:12px;"></p>
+    <div class="field">
+      <label for="bulk-cf-category-select">CF区分</label>
+      <select id="bulk-cf-category-select" name="bulkCfCategory"></select>
+      <div class="field-hint">選択中の区分に応じた候補のみ表示します</div>
+    </div>
+    <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
+      <button id="bulk-cf-category-cancel" type="button" class="secondary">キャンセル</button>
+      <button id="bulk-cf-category-submit" type="button" class="primary">設定する</button>
+    </div>
+  </div>
+</div>
+
+<div id="bulk-color-modal" class="modal-overlay">
+  <div class="modal-box" style="max-width: 520px; width: 94%;">
+    <span id="bulk-color-close" class="modal-close">&times;</span>
+    <h3 style="margin-top:0;">色の一括設定</h3>
+    <p id="bulk-color-summary" style="font-size:13px; color:var(--muted); margin-bottom:12px;"></p>
+    <div class="field">
+      <label for="bulk-color-select">色ラベル</label>
+      <select id="bulk-color-select" name="bulkLabelColor"></select>
+      <div class="field-hint">選択した明細に同じ色を設定します</div>
+    </div>
+    <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
+      <button id="bulk-color-cancel" type="button" class="secondary">キャンセル</button>
+      <button id="bulk-color-submit" type="button" class="primary">設定する</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const yearInput = document.getElementById('year');
   const fixedMonth = String(new Date().getMonth() + 1).padStart(2, '0');
@@ -4114,11 +4280,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const submitBtn = document.getElementById('submit-btn');
   const entryTypeEl = document.getElementById('f-type');
   const entryCfCategoryEl = document.getElementById('f-cf-category');
-  const sumIncomeEl = document.getElementById('sum-income');
-  const sumExpenseEl = document.getElementById('sum-expense');
-  const sumBalanceEl = document.getElementById('sum-balance');
   const balanceAlertEl = document.getElementById('balance-alert');
   const annualExpenseRowsEl = document.getElementById('annual-expense-rows');
+  const annualTodayDateEl = document.getElementById('annual-today-date');
+  const annualTodayBalanceEl = document.getElementById('annual-today-balance');
   const loadSampleBtn = document.getElementById('load-sample');
   const clearSampleBtn = document.getElementById('clear-sample');
   const clearAllEntriesBtn = document.getElementById('clear-all-entries');
@@ -4155,6 +4320,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const entryEditForm = document.getElementById('entry-edit-form');
   const entryEditId = document.getElementById('entry-edit-id');
   const entryEditTitle = document.getElementById('entry-edit-title');
+  const entryEditContent = document.getElementById('entry-edit-content');
   const entryEditAmount = document.getElementById('entry-edit-amount');
   const entryEditType = document.getElementById('entry-edit-type');
   const entryEditLabelColor = document.getElementById('entry-edit-label-color');
@@ -4200,9 +4366,23 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const bulkClearSelectionBtn = document.getElementById('bulk-clear-selection');
   const bulkEditDateBtn = document.getElementById('bulk-edit-date');
   const bulkEditActualDateBtn = document.getElementById('bulk-edit-actual-date');
+  const bulkEditCfCategoryBtn = document.getElementById('bulk-edit-cf-category');
+  const bulkEditColorBtn = document.getElementById('bulk-edit-color');
   const bulkCompleteBtn = document.getElementById('bulk-complete');
   const bulkUncompleteBtn = document.getElementById('bulk-uncomplete');
   const bulkSelectionCaptionEl = document.getElementById('bulk-selection-caption');
+  const bulkCfCategoryModal = document.getElementById('bulk-cf-category-modal');
+  const bulkCfCategorySummary = document.getElementById('bulk-cf-category-summary');
+  const bulkCfCategorySelect = document.getElementById('bulk-cf-category-select');
+  const bulkCfCategoryClose = document.getElementById('bulk-cf-category-close');
+  const bulkCfCategoryCancel = document.getElementById('bulk-cf-category-cancel');
+  const bulkCfCategorySubmit = document.getElementById('bulk-cf-category-submit');
+  const bulkColorModal = document.getElementById('bulk-color-modal');
+  const bulkColorSummary = document.getElementById('bulk-color-summary');
+  const bulkColorSelect = document.getElementById('bulk-color-select');
+  const bulkColorClose = document.getElementById('bulk-color-close');
+  const bulkColorCancel = document.getElementById('bulk-color-cancel');
+  const bulkColorSubmit = document.getElementById('bulk-color-submit');
 
   const MASTER_CF_CATEGORIES = ${JSON.stringify([
     { key: '', label: '未設定', kind: 'cf_category', target: 'all', description: '未分類の明細', sortOrder: 0 },
@@ -4252,6 +4432,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const LIST_COLUMN_LABELS = new Map([
     ['label', 'ラベル'],
     ['cf_category', 'CF区分'],
+    ['content', '内容'],
     ['note', 'メモ'],
     ['actual_date', '入出金日'],
     ['customer_name', '顧客名'],
@@ -4286,6 +4467,13 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   function showBanner(el, type, message) {
     el.className = 'banner show ' + type;
     el.textContent = message;
+  }
+
+  function showBannerAndReveal(el, type, message) {
+    showBanner(el, type, message);
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   }
 
   function hideBanner(el) {
@@ -4505,6 +4693,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     editingEntryId = Number(entry.id);
     if (entryEditId instanceof HTMLInputElement) entryEditId.value = String(entry.id);
     if (entryEditTitle instanceof HTMLInputElement) entryEditTitle.value = String(entry.title || '');
+    if (entryEditContent instanceof HTMLInputElement) entryEditContent.value = String(entry.content || '');
     if (entryEditAmount instanceof HTMLInputElement) entryEditAmount.value = String(Number(entry.amount || 0));
     if (entryEditType instanceof HTMLSelectElement) entryEditType.value = String(entry.type || 'income');
     if (entryEditLabelColor instanceof HTMLSelectElement) entryEditLabelColor.value = String(entry.label_color || 'blue');
@@ -4623,8 +4812,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       const hint = hints.get('note'); if (hint) hint.classList.add('error');
       return 'メモは140文字以内で入力してください。';
     }
+    if (payload.content.length > 140) {
+      const hint = hints.get('content'); if (hint) hint.classList.add('error');
+      return '内容は140文字以内で入力してください。';
+    }
     const allowedAccounts = new Set(['', '三井住友口座', '和気口座', '那須口座']);
-    const allowedColors = new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple']);
+    const allowedColors = new Set(${JSON.stringify([...ENTRY_LABEL_COLORS])});
     const allowedCfCategories = new Set(getCfCategoryOptionsByType(payload.type || 'income'));
     if (!allowedAccounts.has(payload.accountName)) {
       const hint = hints.get('accountName'); if (hint) hint.classList.add('error');
@@ -4660,16 +4853,22 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }).join('');
   }
 
-  function updateSummary(summary) {
-    const income = Number(summary.income || 0);
-    const expense = Number(summary.expense || 0);
-    const balance = Number(summary.balance || 0);
+  function buildLabelColorOptionsHtml(selected) {
+    return MASTER_LABEL_COLORS.map((item) => (
+      '<option value="' + escapeHtml(item.key) + '"' + (item.key === selected ? ' selected' : '') + '>色:' + escapeHtml(item.label) + '</option>'
+    )).join('');
+  }
 
-    sumIncomeEl.textContent = fmt.format(income);
-    sumExpenseEl.textContent = fmt.format(expense);
-    sumBalanceEl.textContent = (balance > 0 ? '+' : '') + fmt.format(balance);
-    sumBalanceEl.classList.remove('plus', 'minus');
-    sumBalanceEl.classList.add(balance < 0 ? 'minus' : 'plus');
+  function closeModal(modal) {
+    if (modal instanceof HTMLElement) modal.style.display = 'none';
+  }
+
+  function openModal(modal) {
+    if (modal instanceof HTMLElement) modal.style.display = 'flex';
+  }
+
+  function updateSummary(summary) {
+    const balance = Number(summary.balance || 0);
     if (balance < 0) {
       balanceAlertEl.textContent = '警告: 今月の差引がマイナスです。資金繰りを確認してください。';
       balanceAlertEl.classList.add('show');
@@ -4748,6 +4947,24 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   function renderAnnualExpenses(rows) {
+    const today = new Date();
+    const todayIso = today.toISOString().slice(0, 10);
+    const todayLabel = todayIso.replace(/-/g, '/');
+    if (annualTodayDateEl instanceof HTMLElement) {
+      annualTodayDateEl.textContent = todayLabel;
+    }
+    let todayBalance = 0;
+    for (const entry of rows) {
+      const scheduledDate = String(entry.scheduled_date || '');
+      if (scheduledDate > todayIso) continue;
+      const amount = Number(entry.amount || 0);
+      todayBalance += entry.type === 'income' ? amount : -amount;
+    }
+    if (annualTodayBalanceEl instanceof HTMLElement) {
+      annualTodayBalanceEl.textContent = (todayBalance > 0 ? '+' : '') + '¥' + fmt.format(todayBalance);
+      annualTodayBalanceEl.classList.remove('plus', 'minus');
+      annualTodayBalanceEl.classList.add(todayBalance < 0 ? 'minus' : 'plus');
+    }
     if (rows.length === 0) {
       annualExpenseRowsEl.innerHTML = '<tr><td colspan="6" class="muted">この年のデータはありません。</td></tr>';
       return;
@@ -4883,6 +5100,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       if (!keyword) return true;
       const haystack = [
         e.title || '',
+        e.content || '',
         e.note || '',
         e.cf_category || '',
         e.account_name || '',
@@ -4914,12 +5132,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       ? '<button type="button" class="toggle-mgmt" data-togglemgmt="1" data-id="' + e.id + '">' + toggleLabel + '</button>'
       : '';
     const detailRow = hasMgmt && expanded
-      ? '<tr class="detail-row" data-parent-id="' + e.id + '"><td></td><td colspan="14">入出金管理No: ' + escapeHtml(String(e.import_management_no || '')) + '</td></tr>'
+      ? '<tr class="detail-row" data-parent-id="' + e.id + '"><td></td><td colspan="15">入出金管理No: ' + escapeHtml(String(e.import_management_no || '')) + '</td></tr>'
       : '';
 
     return {
       rowHtml:
-        '<tr class="' + rowClass + '" data-entry-id="' + e.id + '">' +
+      '<tr class="' + rowClass + '" data-entry-id="' + e.id + '">' +
           '<td class="toggle-cell" data-list-col="toggle">' + toggleButton + '</td>' +
           '<td data-list-col="index">' + (idx + 1) + '</td>' +
           '<td data-list-col="label">' +
@@ -4929,6 +5147,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
           '<td data-list-col="type">' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
           '<td data-list-col="cf_category">' + escapeHtml(e.cf_category || '未設定') + '</td>' +
           '<td data-list-col="title">' + escapeHtml(e.title) + '</td>' +
+          '<td data-list-col="content">' + escapeHtml(e.content || '') + '</td>' +
           '<td class="amount ' + e.type + '" data-list-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
           '<td data-list-col="note">' + escapeHtml(e.note || '') + '</td>' +
           '<td data-list-col="actual_date">' + escapeHtml(e.actual_transaction_date || '') + '</td>' +
@@ -4952,12 +5171,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
               buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
               '</select>' +
               '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
-              '<option value="red"' + (e.label_color === 'red' ? ' selected' : '') + '>色:赤</option>' +
-              '<option value="orange"' + (e.label_color === 'orange' ? ' selected' : '') + '>色:橙</option>' +
-              '<option value="yellow"' + (e.label_color === 'yellow' ? ' selected' : '') + '>色:黄</option>' +
-              '<option value="green"' + (e.label_color === 'green' ? ' selected' : '') + '>色:緑</option>' +
-              '<option value="blue"' + ((e.label_color === 'blue' || !e.label_color) ? ' selected' : '') + '>色:青</option>' +
-              '<option value="purple"' + (e.label_color === 'purple' ? ' selected' : '') + '>色:紫</option>' +
+              buildLabelColorOptionsHtml(String(e.label_color || 'blue')) +
               '</select>' +
             '</div>' +
           '</td>' +
@@ -5011,7 +5225,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 
   function renderRows() {
     if (entries.length === 0) {
-      rowsEl.innerHTML = '<tr><td colspan="15" class="muted">データがありません。上のフォームから予定を追加してください。</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="16" class="muted">データがありません。上のフォームから予定を追加してください。</td></tr>';
       listFilterCaptionEl.textContent = '';
       updateBulkSelectionCaption();
       syncListScrollWidth();
@@ -5025,7 +5239,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       : String(filtered.length) + ' / ' + String(entries.length) + '件を表示';
 
     if (filtered.length === 0) {
-      rowsEl.innerHTML = '<tr><td colspan="15" class="muted">絞り込み条件に一致する予定はありません。</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="16" class="muted">絞り込み条件に一致する予定はありません。</td></tr>';
       updateBulkSelectionCaption();
       syncListScrollWidth();
       return;
@@ -5052,8 +5266,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   async function bulkUpdate(action, payload, successMessage) {
     const ids = getSelectedIdsInCurrentEntries();
     if (ids.length === 0) {
-      showBanner(statusBanner, 'warn', '先に対象行をチェックしてください。');
-      return;
+      showBannerAndReveal(statusBanner, 'warn', '先に対象行をチェックしてください。');
+      return false;
     }
     try {
       const res = await fetch('/api/entries/bulk', {
@@ -5065,14 +5279,63 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         const rawBody = await res.text();
         const parsed = safeJsonParse(rawBody) || {};
         showBanner(statusBanner, 'error', buildApiErrorMessage(parsed, rawBody, '一括更新に失敗しました。'));
-        return;
+        return false;
       }
       showBanner(statusBanner, 'ok', successMessage.replace('{count}', String(ids.length)));
       selectedEntryIds.clear();
       await loadAll();
+      return true;
     } catch (_) {
       showBanner(statusBanner, 'error', '一括更新中に通信エラーが発生しました。');
+      return false;
     }
+  }
+
+  function getSelectedEntries() {
+    const ids = new Set(getSelectedIdsInCurrentEntries());
+    return entries.filter((entry) => ids.has(Number(entry.id)));
+  }
+
+  function getSelectedEntryTypeForBulkCf() {
+    const selectedEntries = getSelectedEntries();
+    if (selectedEntries.length === 0) {
+      showBannerAndReveal(statusBanner, 'warn', '先に対象行をチェックしてください。');
+      return null;
+    }
+    const types = [...new Set(selectedEntries.map((entry) => String(entry.type || '')))];
+    if (types.length !== 1 || (types[0] !== 'income' && types[0] !== 'expense')) {
+      showBannerAndReveal(statusBanner, 'warn', 'CF区分の一括設定は入金のみ、または出金のみを選択してください。');
+      return null;
+    }
+    return { type: types[0], count: selectedEntries.length };
+  }
+
+  function showBulkCfCategoryModal() {
+    const selection = getSelectedEntryTypeForBulkCf();
+    if (!selection) return;
+    if (!(bulkCfCategorySelect instanceof HTMLSelectElement)) return;
+    bulkCfCategorySelect.innerHTML = buildEntryCfCategoryOptionsHtml('', selection.type);
+    bulkCfCategorySelect.value = '';
+    if (bulkCfCategorySummary instanceof HTMLElement) {
+      bulkCfCategorySummary.textContent = selection.count + '件の' + (selection.type === 'income' ? '入金' : '出金') + '明細に同じCF区分を設定します。';
+    }
+    openModal(bulkCfCategoryModal);
+  }
+
+  function showBulkColorModal() {
+    const selectedEntries = getSelectedEntries();
+    if (selectedEntries.length === 0) {
+      showBannerAndReveal(statusBanner, 'warn', '先に対象行をチェックしてください。');
+      return;
+    }
+    if (bulkColorSelect instanceof HTMLSelectElement) {
+      bulkColorSelect.innerHTML = buildLabelColorOptionsHtml('blue');
+      bulkColorSelect.value = 'blue';
+    }
+    if (bulkColorSummary instanceof HTMLElement) {
+      bulkColorSummary.textContent = selectedEntries.length + '件の明細に同じ色ラベルを設定します。';
+    }
+    openModal(bulkColorModal);
   }
 
   function moveEntry(index, dir) {
@@ -5253,6 +5516,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   function buildEntryEditPayload() {
     return {
       title: String(entryEditTitle instanceof HTMLInputElement ? entryEditTitle.value : '').trim(),
+      content: String(entryEditContent instanceof HTMLInputElement ? entryEditContent.value : '').trim(),
       amount: Number(entryEditAmount instanceof HTMLInputElement ? entryEditAmount.value : 0),
       type: String(entryEditType instanceof HTMLSelectElement ? entryEditType.value : 'income'),
       scheduledDate: normalizeDate(String(entryEditScheduledDate instanceof HTMLInputElement ? entryEditScheduledDate.value : '')),
@@ -5444,6 +5708,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const fd = new FormData(form);
     const payload = {
       title: String(fd.get('title') || '').trim(),
+      content: String(fd.get('content') || '').trim(),
       amount: Number(fd.get('amount') || 0),
       type: String(fd.get('type') || 'income'),
       scheduledDate: normalizeDate(String(fd.get('scheduledDate') || '')),
@@ -5682,6 +5947,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         '<td>' + escapeHtml(String(row.managementNoOld || row.managementNo || '')) + '</td>',
         '<td><span class="cashflow-import-preview-badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span></td>',
         '<td>' + formatDiffCell(row.titleOld, row.title) + '</td>',
+        '<td>' + formatDiffCell(row.contentOld || '', row.content || '') + '</td>',
         '<td>' + formatDiffCell(formatCurrency(row.amountOld), formatCurrency(row.amount)) + '</td>',
         '<td>' + formatDiffCell(row.scheduledDateOld, row.scheduledDate) + '</td>',
         '<td>' + formatDiffCell(row.customerNameOld || '', row.customerName || '') + '</td>',
@@ -5721,13 +5987,14 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       '<th style="width:120px;">管理番号</th>',
       '<th style="width:88px;">状態</th>',
       '<th>件名 (DB &rarr; CSV)</th>',
+      '<th>内容 (DB &rarr; CSV)</th>',
       '<th>金額 (DB &rarr; CSV)</th>',
       '<th>予定日 (DB &rarr; CSV)</th>',
       '<th>顧客名 (DB &rarr; CSV)</th>',
       '</tr>',
       '</thead>',
       '<tbody>',
-      updateRowsHtml || '<tr><td colspan="9" class="muted" style="padding:12px;">更新候補はありません。</td></tr>',
+      updateRowsHtml || '<tr><td colspan="10" class="muted" style="padding:12px;">更新候補はありません。</td></tr>',
       '</tbody>',
       '</table>',
       '</div>',
@@ -5845,6 +6112,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         rowNumber: row.rowNumber,
         id: row.id,
         title: row.title,
+        content: row.content,
         amount: row.amount,
         type: row.type,
         scheduledDate: row.scheduledDate,
@@ -5862,6 +6130,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       newEntries: pendingCashflowImportPreview.newEntries.map((row) => ({
         rowNumber: row.rowNumber,
         title: row.title,
+        content: row.content,
         amount: row.amount,
         type: row.type,
         scheduledDate: row.scheduledDate,
@@ -6175,13 +6444,14 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       showBanner(statusBanner, 'warn', '出力するデータがありません。');
       return;
     }
-    const headers = ['ID', '予定日', '区分', 'CF区分', '件名', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'];
+    const headers = ['ID', '予定日', '区分', 'CF区分', '件名', '内容', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'];
     const rows = filtered.map((e, idx) => [
       e.id || '',
       e.scheduled_date || '',
       e.type === 'income' ? '入金' : '出金',
       e.cf_category || '',
       e.title || '',
+      e.content || '',
       e.amount || 0,
       e.note || '',
       e.actual_transaction_date || '',
@@ -6264,11 +6534,41 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (normalized == null) return;
     await bulkUpdate('set_actual_date', { actualTransactionDate: normalized }, '{count}件の確定日を更新しました。');
   });
+  bulkEditCfCategoryBtn?.addEventListener('click', () => {
+    showBulkCfCategoryModal();
+  });
+  bulkEditColorBtn?.addEventListener('click', () => {
+    showBulkColorModal();
+  });
   bulkCompleteBtn?.addEventListener('click', async () => {
     await bulkUpdate('set_completed', { isCompleted: true }, '{count}件を完了にしました。');
   });
   bulkUncompleteBtn?.addEventListener('click', async () => {
     await bulkUpdate('set_completed', { isCompleted: false }, '{count}件を未完了にしました。');
+  });
+  bulkCfCategoryClose?.addEventListener('click', () => closeModal(bulkCfCategoryModal));
+  bulkCfCategoryCancel?.addEventListener('click', () => closeModal(bulkCfCategoryModal));
+  bulkCfCategoryModal?.addEventListener('click', (ev) => {
+    if (ev.target === bulkCfCategoryModal) closeModal(bulkCfCategoryModal);
+  });
+  bulkCfCategorySubmit?.addEventListener('click', async () => {
+    const selection = getSelectedEntryTypeForBulkCf();
+    if (!selection || !(bulkCfCategorySelect instanceof HTMLSelectElement)) return;
+    const cfCategory = String(bulkCfCategorySelect.value || '').trim();
+    closeModal(bulkCfCategoryModal);
+    const updated = await bulkUpdate('set_cf_category', { cfCategory }, '{count}件のCF区分を更新しました。');
+    if (updated && isEditMode) refreshStatementFrame();
+  });
+  bulkColorClose?.addEventListener('click', () => closeModal(bulkColorModal));
+  bulkColorCancel?.addEventListener('click', () => closeModal(bulkColorModal));
+  bulkColorModal?.addEventListener('click', (ev) => {
+    if (ev.target === bulkColorModal) closeModal(bulkColorModal);
+  });
+  bulkColorSubmit?.addEventListener('click', async () => {
+    if (!(bulkColorSelect instanceof HTMLSelectElement)) return;
+    const labelColor = String(bulkColorSelect.value || '').trim();
+    closeModal(bulkColorModal);
+    await bulkUpdate('set_label_color', { labelColor }, '{count}件の色ラベルを更新しました。');
   });
 
   function bindToggle(btn, section, labels = { collapsed: '開く', expanded: '折りたたむ' }) {
@@ -8301,6 +8601,7 @@ function parseCashflowImportCsvText(text: string): CashflowImportParsedRow[] {
     type: header.indexOf('区分'),
     cfCategory: header.indexOf('CF区分'),
     title: header.indexOf('件名'),
+    content: header.indexOf('内容'),
     amount: header.indexOf('金額'),
     note: header.indexOf('メモ'),
     actualDate: header.indexOf('入出金日'),
@@ -8334,6 +8635,7 @@ function parseCashflowImportCsvText(text: string): CashflowImportParsedRow[] {
     const labelColor = idx.labelColor >= 0 ? String(cols[idx.labelColor] ?? '').trim() : '';
     const managementNo = idx.managementNo >= 0 ? String(cols[idx.managementNo] ?? '').trim() : '';
     const cfCategory = idx.cfCategory >= 0 ? String(cols[idx.cfCategory] ?? '').trim() : '';
+    const content = idx.content >= 0 ? String(cols[idx.content] ?? '').trim() : '';
 
     const scheduledDate = parseSlashOrIsoDate(rawScheduledDate);
     if (!scheduledDate) {
@@ -8360,6 +8662,7 @@ function parseCashflowImportCsvText(text: string): CashflowImportParsedRow[] {
       scheduledDate,
       type,
       title: title.slice(0, 120),
+      content: content.slice(0, MAX_CONTENT_LENGTH),
       amount,
       note: note || '',
       actualDate: parseSlashOrIsoDate(actualDate) || '',
@@ -8380,6 +8683,7 @@ function buildCashflowImportMatchKey(row: {
   scheduledDate: string;
   type: 'income' | 'expense';
   title: string;
+  content: string;
   amount: number;
   note: string;
   actualDate: string;
@@ -8394,6 +8698,7 @@ function buildCashflowImportMatchKey(row: {
     row.scheduledDate,
     row.type,
     row.title,
+    row.content,
     String(row.amount),
     row.note,
     row.actualDate,
@@ -8481,6 +8786,7 @@ async function parseJsonBody<T>(c: { req: { json: <U>() => Promise<U> } }): Prom
 
 function isValidEntryInput(input: {
   title: string;
+  content: string;
   note: string;
   amount: unknown;
   type: unknown;
@@ -8492,6 +8798,7 @@ function isValidEntryInput(input: {
   cfCategory: string;
 }, allowedCfCategories?: Set<string>): input is {
   title: string;
+  content: string;
   note: string;
   amount: number;
   type: 'income' | 'expense';
@@ -8508,6 +8815,7 @@ function isValidEntryInput(input: {
   return (
     input.title.length > 0 &&
     input.title.length <= MAX_TITLE_LENGTH &&
+    input.content.length <= MAX_CONTENT_LENGTH &&
     input.note.length <= MAX_NOTE_LENGTH &&
     allowedAccounts.has(input.accountName) &&
     input.accountName.length <= 80 &&
