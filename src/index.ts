@@ -3292,6 +3292,15 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .primary { background: var(--accent); color: #fff; border: 0; font-weight: 700; }
     .primary:hover { background: #0d426f; }
     .secondary { background: #fff; }
+    .reset-filter-button {
+      background: #eaf2fb;
+      border-color: #9bb6d0;
+      color: #0f4c81;
+      font-weight: 700;
+    }
+    .reset-filter-button:hover {
+      background: #dbe9f7;
+    }
 
     .banner { display: none; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; }
     .banner.show { display: block; }
@@ -3874,6 +3883,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       <select id="list-filter-month" aria-label="月絞り込み">
         <option value="all">月: すべて</option>
       </select>
+      <select id="list-filter-day" aria-label="日絞り込み">
+        <option value="all">日: すべて</option>
+      </select>
       <select id="list-filter-type" aria-label="区分絞り込み">
         <option value="all">区分: すべて</option>
         <option value="income">区分: 入金</option>
@@ -3897,7 +3909,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         <option value="gray">ラベル: 灰</option>
         <option value="lightblue">ラベル: 水</option>
       </select>
-      <button id="list-filter-reset" type="button">絞り込み解除</button>
+      <button id="list-filter-reset" type="button" class="reset-filter-button">絞り込み解除</button>
       <button id="export-csv" class="secondary" type="button">CSV出力</button>
       <button id="download-master-csv" class="secondary" type="button">マスターダウンロード</button>
       <input id="cashflow-csv-file" type="file" accept=".csv,text/csv" style="display:none" />
@@ -4354,6 +4366,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const listSectionBody = document.getElementById('list-section-body');
   const listFilterKeywordEl = document.getElementById('list-filter-keyword');
   const listFilterMonthEl = document.getElementById('list-filter-month');
+  const listFilterDayEl = document.getElementById('list-filter-day');
   const listFilterTypeEl = document.getElementById('list-filter-type');
   const listFilterCompletedEl = document.getElementById('list-filter-completed');
   const listFilterLabelEl = document.getElementById('list-filter-label');
@@ -4427,6 +4440,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   let hiddenStatementFrameEl = statementFrameBufferEl;
   let statementFrameRefreshSeq = 0;
   let latestStatementFrameRefreshSeq = 0;
+  let statementFrameNeedsRefresh = false;
+  let statementFrameRefreshTimer = 0;
   const LIST_COLUMN_STORAGE_KEY = 'cashflow-list-hidden-columns-v1';
   const LIST_COLUMN_HIDE_PRESET = ['label', 'cf_category', 'note', 'actual_date', 'customer_name', 'staff_name', 'running', 'actions'];
   const LIST_COLUMN_LABELS = new Map([
@@ -4450,7 +4465,6 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   restoreEditMode();
   if (isEditMode) showEditModeColumns();
   syncEditModeUi();
-  if (isEditMode) refreshStatementFrame();
   syncListScrollWidth();
   syncListScrollPositionFromTable();
 
@@ -4573,8 +4587,34 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     isSyncingListScroll = false;
   }
 
+  function hasStatementFrameSource(frame) {
+    if (!(frame instanceof HTMLIFrameElement)) return false;
+    const src = String(frame.getAttribute('src') || frame.src || '');
+    return src !== '' && !src.startsWith('about:blank');
+  }
+
+  function handleStatementFrameLoad(event) {
+    const frame = event.target;
+    if (!(frame instanceof HTMLIFrameElement) || !hasStatementFrameSource(frame)) return;
+    statementFrameNeedsRefresh = false;
+  }
+
+  function invalidateStatementFrame() {
+    statementFrameNeedsRefresh = true;
+    if (!isEditMode) return;
+    if (statementFrameRefreshTimer) window.clearTimeout(statementFrameRefreshTimer);
+    statementFrameRefreshTimer = window.setTimeout(() => {
+      statementFrameRefreshTimer = 0;
+      refreshStatementFrame();
+    }, 120);
+  }
+
   function refreshStatementFrame() {
     if (!isEditMode || !(visibleStatementFrameEl instanceof HTMLIFrameElement) || !(hiddenStatementFrameEl instanceof HTMLIFrameElement)) return;
+    if (statementFrameRefreshTimer) {
+      window.clearTimeout(statementFrameRefreshTimer);
+      statementFrameRefreshTimer = 0;
+    }
     const refreshSeq = ++statementFrameRefreshSeq;
     latestStatementFrameRefreshSeq = refreshSeq;
     const baseUrl = String(visibleStatementFrameEl.dataset.src || '/cashflow-statement?embedded=1');
@@ -4593,6 +4633,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       const previousVisible = visibleStatementFrameEl;
       visibleStatementFrameEl = nextVisibleFrame;
       hiddenStatementFrameEl = previousVisible;
+      statementFrameNeedsRefresh = false;
       if (hiddenStatementFrameEl instanceof HTMLIFrameElement) {
         hiddenStatementFrameEl.classList.add('is-hidden');
         hiddenStatementFrameEl.style.visibility = 'hidden';
@@ -4624,14 +4665,23 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     isEditMode = !isEditMode;
     if (isEditMode) {
       showEditModeColumns();
-      refreshStatementFrame();
+      if (statementFrameNeedsRefresh || !hasStatementFrameSource(visibleStatementFrameEl)) {
+        refreshStatementFrame();
+      }
     } else {
+      if (statementFrameRefreshTimer) {
+        window.clearTimeout(statementFrameRefreshTimer);
+        statementFrameRefreshTimer = 0;
+      }
       latestStatementFrameRefreshSeq = ++statementFrameRefreshSeq;
       restoreEditModeColumns();
     }
     saveEditModePreference(isEditMode);
     syncEditModeUi();
   }
+
+  statementFrameEl?.addEventListener('load', handleStatementFrameLoad);
+  statementFrameBufferEl?.addEventListener('load', handleStatementFrameLoad);
 
   window.__toggleEditMode = toggleEditMode;
   editModeToggleBtn?.addEventListener('click', (ev) => {
@@ -4914,6 +4964,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
       syncMonthFilterOptions();
+      syncDayFilterOptions();
       if (debugSummaryEl) {
         debugSummaryEl.textContent = summaryRes.ok
           ? 'income=' + String(Number(summary.income || 0)) + ' expense=' + String(Number(summary.expense || 0)) + ' balance=' + String(Number(summary.balance || 0))
@@ -4928,7 +4979,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       syncListScrollPositionFromTable();
       updateSelectedMonthAlert();
       renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
-      if (isEditMode) refreshStatementFrame();
+      if (isEditMode && statementFrameNeedsRefresh) invalidateStatementFrame();
       if (!entriesRes.ok) {
         showBanner(statusBanner, 'error', '一覧データの取得に失敗しました。再読み込みしてください。');
       } else {
@@ -5000,6 +5051,20 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     listFilterMonthEl.innerHTML = '<option value="all">月: すべて</option>' +
       months.map((mm) => '<option value="' + mm + '">' + Number(mm) + '月</option>').join('');
     listFilterMonthEl.value = (previous === 'all' || months.includes(previous)) ? previous : 'all';
+  }
+
+  function syncDayFilterOptions() {
+    if (!listFilterDayEl) return;
+    const previous = String(listFilterDayEl.value || 'all');
+    const monthFilter = String(listFilterMonthEl?.value || 'all');
+    const year = Number(String(yearInput.value || '').trim()) || new Date().getFullYear();
+    const dayCount = monthFilter === 'all'
+      ? 31
+      : new Date(year, Number(monthFilter), 0).getDate();
+    const days = Array.from({ length: dayCount }, (_, i) => String(i + 1).padStart(2, '0'));
+    listFilterDayEl.innerHTML = '<option value="all">日: すべて</option>' +
+      days.map((dd) => '<option value="' + dd + '">' + Number(dd) + '日</option>').join('');
+    listFilterDayEl.value = (previous === 'all' || days.includes(previous)) ? previous : 'all';
   }
 
   async function pickDateWithCalendar(initialValue, allowEmpty) {
@@ -5083,14 +5148,16 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   function getFilteredEntries() {
     const keyword = String(listFilterKeywordEl?.value || '').trim().toLowerCase();
     const monthFilter = String(listFilterMonthEl?.value || 'all');
+    const dayFilter = String(listFilterDayEl?.value || 'all');
     const typeFilter = String(listFilterTypeEl?.value || 'all');
     const completedFilter = String(listFilterCompletedEl?.value || 'all');
     const labelFilter = String(listFilterLabelEl?.value || 'all');
     return entries.filter((e) => {
+      const d = String(e.scheduled_date || '');
       if (monthFilter !== 'all') {
-        const d = String(e.scheduled_date || '');
         if (d.slice(5, 7) !== monthFilter) return false;
       }
+      if (dayFilter !== 'all' && d.slice(8, 10) !== dayFilter) return false;
       if (typeFilter !== 'all' && e.type !== typeFilter) return false;
       const labelColor = String(e.label_color || 'blue');
       if (labelFilter !== 'all' && labelColor !== labelFilter) return false;
@@ -5439,6 +5506,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         showBanner(statusBanner, 'error', '削除に失敗しました。権限または最新状態を確認してください。');
         return;
       }
+      invalidateStatementFrame();
       showBanner(statusBanner, 'ok', '予定を削除しました。');
       await loadAll();
     } catch (_) {
@@ -5483,6 +5551,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         showBanner(statusBanner, 'error', '日付の更新に失敗しました。');
         return;
       }
+      invalidateStatementFrame();
       patchEntryInMemory(id, { scheduled_date: normalized });
       patchRenderedRow(id);
     } catch (_) {
@@ -5623,7 +5692,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         }
         patchEntryInMemory(id, { cf_category: cfCategory });
         patchRenderedRow(id);
-        if (isEditMode) refreshStatementFrame();
+        invalidateStatementFrame();
       } catch (_) {
         showBanner(statusBanner, 'error', 'CF区分更新中に通信エラーが発生しました。');
         target.value = previousCfCategory;
@@ -5685,6 +5754,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         showBanner(statusBanner, 'error', buildApiErrorMessage(parsed, rawBody, '予定の更新に失敗しました。'));
         return;
       }
+      invalidateStatementFrame();
       closeEntryEditModal();
       const refreshed = await loadAll();
       if (refreshed) {
@@ -5739,6 +5809,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         return;
       }
 
+      invalidateStatementFrame();
       showBanner(statusBanner, 'ok', '予定を追加しました。');
       form.reset();
       syncFormDateWithMonth();
@@ -5765,6 +5836,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   loadSampleBtn.addEventListener('click', async () => {
     const res = await fetch('/api/sample/load', { method: 'POST' });
     if (res.ok) {
+      invalidateStatementFrame();
       showBanner(statusBanner, 'ok', 'サンプルデータを投入しました。');
       await loadAll();
     } else {
@@ -5777,6 +5849,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (!ok) return;
     const res = await fetch('/api/sample', { method: 'DELETE' });
     if (res.ok) {
+      invalidateStatementFrame();
       showBanner(statusBanner, 'ok', 'サンプルデータを削除しました。');
       await loadAll();
     } else {
@@ -5789,6 +5862,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const res = await fetch('/api/entries', { method: 'DELETE' });
     const payload = await res.json().catch(() => ({}));
     if (res.ok) {
+      invalidateStatementFrame();
       showBanner(statusBanner, 'ok', '予定を全削除しました。件数: ' + String(payload.affected || 0));
       await loadAll();
     } else {
@@ -6179,6 +6253,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         return;
       }
       closeCashflowImportPreviewModal();
+      invalidateStatementFrame();
       showImportResultModal({
         title: 'CSV取込み結果',
         status: 'ok',
@@ -6278,6 +6353,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         'ok',
         \`インポート完了: 新規追加 \${payload.insertedCount || 0} 件 / 上書き更新 \${payload.updatedCount || 0} 件\`
       );
+      invalidateStatementFrame();
       await loadAll();
     } catch (_) {
       showBanner(statusBanner, 'error', 'インポートの確定中にエラーが発生しました。');
@@ -6401,8 +6477,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     renderRows();
   });
   listFilterMonthEl?.addEventListener('change', () => {
+    syncDayFilterOptions();
     renderRows();
     updateSelectedMonthAlert();
+  });
+  listFilterDayEl?.addEventListener('change', () => {
+    renderRows();
   });
   listFilterTypeEl?.addEventListener('change', () => {
     renderRows();
@@ -6416,9 +6496,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   listFilterResetBtn?.addEventListener('click', () => {
     listFilterKeywordEl.value = '';
     listFilterMonthEl.value = 'all';
+    if (listFilterDayEl) listFilterDayEl.value = 'all';
     listFilterTypeEl.value = 'all';
     listFilterCompletedEl.value = 'all';
     listFilterLabelEl.value = 'all';
+    syncDayFilterOptions();
     renderRows();
     updateSelectedMonthAlert();
   });
@@ -6527,7 +6609,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       showBanner(statusBanner, 'warn', '日付を選択してください。');
       return;
     }
-    await bulkUpdate('set_date', { scheduledDate: normalized }, '{count}件の予定日を更新しました。');
+    const updated = await bulkUpdate('set_date', { scheduledDate: normalized }, '{count}件の予定日を更新しました。');
+    if (updated) invalidateStatementFrame();
   });
   bulkEditActualDateBtn?.addEventListener('click', async () => {
     const normalized = await pickDateWithCalendar('', true);
@@ -6557,7 +6640,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const cfCategory = String(bulkCfCategorySelect.value || '').trim();
     closeModal(bulkCfCategoryModal);
     const updated = await bulkUpdate('set_cf_category', { cfCategory }, '{count}件のCF区分を更新しました。');
-    if (updated && isEditMode) refreshStatementFrame();
+    if (updated) invalidateStatementFrame();
   });
   bulkColorClose?.addEventListener('click', () => closeModal(bulkColorModal));
   bulkColorCancel?.addEventListener('click', () => closeModal(bulkColorModal));
