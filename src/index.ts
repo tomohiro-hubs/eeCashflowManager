@@ -3210,6 +3210,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       --ok-bg: #edf9f1;
       --ok-line: #bce7cb;
       --shadow: 0 6px 20px rgba(10, 36, 64, 0.08);
+      --list-title-col-width: 220px;
+      --list-content-col-width: 180px;
+      --list-note-col-width: 140px;
+      --annual-title-col-width: 220px;
+      --annual-customer-col-width: 160px;
+      --annual-note-col-width: 160px;
     }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: "Noto Sans JP", "Hiragino Sans", sans-serif; background: linear-gradient(180deg, #f7f9fc 0%, var(--bg) 100%); color: var(--text); }
@@ -3362,12 +3368,87 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     #rows td:nth-child(5) { white-space: nowrap; min-width: 72px; }
     #rows th:nth-child(8),
     #rows td:nth-child(8) { min-width: 180px; }
+    #list-section-body [data-list-col="title"] {
+      width: var(--list-title-col-width);
+      min-width: var(--list-title-col-width);
+      max-width: var(--list-title-col-width);
+    }
+    #list-section-body [data-list-col="content"] {
+      width: var(--list-content-col-width);
+      min-width: var(--list-content-col-width);
+      max-width: var(--list-content-col-width);
+    }
+    #list-section-body [data-list-col="note"] {
+      width: var(--list-note-col-width);
+      min-width: var(--list-note-col-width);
+      max-width: var(--list-note-col-width);
+    }
+    #list-section-body td[data-list-col="title"] {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #list-section-body td[data-list-col="content"],
+    #list-section-body td[data-list-col="note"] {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .resizable-col-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    .col-resizer {
+      flex: 0 0 auto;
+      width: 10px;
+      min-width: 10px;
+      height: 20px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      cursor: col-resize;
+      background: linear-gradient(180deg, rgba(15, 76, 129, 0.10) 0%, rgba(15, 76, 129, 0.22) 100%);
+    }
+    .col-resizer:hover,
+    .col-resizer:focus-visible {
+      background: linear-gradient(180deg, rgba(15, 76, 129, 0.20) 0%, rgba(15, 76, 129, 0.34) 100%);
+      outline: none;
+    }
     #rows th:nth-child(10),
     #rows td:nth-child(10) { white-space: nowrap; min-width: 110px; }
     #rows th:nth-child(14),
     #rows td:nth-child(14) { white-space: nowrap; min-width: 120px; }
     #rows th:nth-child(15),
     #rows td:nth-child(15) { white-space: nowrap; min-width: 210px; }
+    #annual-section-body [data-annual-col="title"] {
+      width: var(--annual-title-col-width);
+      min-width: var(--annual-title-col-width);
+      max-width: var(--annual-title-col-width);
+    }
+    #annual-section-body th:first-child,
+    #annual-section-body td:first-child {
+      width: 110px;
+      min-width: 110px;
+      max-width: 110px;
+      white-space: nowrap;
+    }
+    #annual-section-body [data-annual-col="customer_name"] {
+      width: var(--annual-customer-col-width);
+      min-width: var(--annual-customer-col-width);
+      max-width: var(--annual-customer-col-width);
+    }
+    #annual-section-body [data-annual-col="note"] {
+      width: var(--annual-note-col-width);
+      min-width: var(--annual-note-col-width);
+      max-width: var(--annual-note-col-width);
+    }
+    #annual-section-body td[data-annual-col="title"],
+    #annual-section-body td[data-annual-col="customer_name"],
+    #annual-section-body td[data-annual-col="note"] {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .actions { display: flex; flex-direction: column; gap: 4px; min-width: 210px; }
     .select-cell { text-align: center; width: 52px; }
     .toggle-cell { text-align: center; width: 42px; }
@@ -3861,7 +3942,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     </div>
     <div id="annual-section-body" class="table-wrap collapsed">
       <table>
-        <thead><tr><th>日付</th><th>区分</th><th>件名</th><th>顧客名</th><th>金額</th><th>メモ</th><th>残高</th></tr></thead>
+        <thead><tr><th>日付</th><th>区分</th><th data-annual-col="title"><span class="resizable-col-head"><span>件名</span><button id="annual-title-col-resizer" class="col-resizer" type="button" aria-label="年間明細の件名列の幅を調整"></button></span></th><th data-annual-col="customer_name"><span class="resizable-col-head"><span>顧客名</span><button id="annual-customer-col-resizer" class="col-resizer" type="button" aria-label="年間明細の顧客名列の幅を調整"></button></span></th><th>金額</th><th data-annual-col="note"><span class="resizable-col-head"><span>メモ</span><button id="annual-note-col-resizer" class="col-resizer" type="button" aria-label="年間明細のメモ列の幅を調整"></button></span></th><th>残高</th></tr></thead>
         <tbody id="annual-expense-rows"></tbody>
       </table>
     </div>
@@ -4030,7 +4111,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     </div>
     <div id="list-section-body" class="table-wrap">
       <table>
-        <thead><tr><th data-list-col="toggle"></th><th data-list-col="index">#</th><th data-list-col="label">ラベル</th><th data-list-col="scheduled_date">予定日</th><th data-list-col="type">区分</th><th data-list-col="cf_category">CF区分</th><th data-list-col="title">件名</th><th data-list-col="content">内容</th><th data-list-col="amount">金額</th><th data-list-col="note">メモ</th><th data-list-col="actual_date">入出金日</th><th data-list-col="customer_name">顧客名</th><th data-list-col="staff_name">担当</th><th data-list-col="running">残高</th><th data-list-col="actions">操作</th><th data-list-col="select">選択</th></tr></thead>
+        <thead><tr><th data-list-col="toggle"></th><th data-list-col="index">#</th><th data-list-col="label">ラベル</th><th data-list-col="scheduled_date">予定日</th><th data-list-col="type">区分</th><th data-list-col="cf_category">CF区分</th><th data-list-col="title"><span class="resizable-col-head"><span>件名</span><button id="title-col-resizer" class="col-resizer" type="button" aria-label="件名列の幅を調整"></button></span></th><th data-list-col="content"><span class="resizable-col-head"><span>内容</span><button id="content-col-resizer" class="col-resizer" type="button" aria-label="内容列の幅を調整"></button></span></th><th data-list-col="amount">金額</th><th data-list-col="note"><span class="resizable-col-head"><span>メモ</span><button id="note-col-resizer" class="col-resizer" type="button" aria-label="メモ列の幅を調整"></button></span></th><th data-list-col="actual_date">入出金日</th><th data-list-col="customer_name">顧客名</th><th data-list-col="staff_name">担当</th><th data-list-col="running">残高</th><th data-list-col="actions">操作</th><th data-list-col="select">選択</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -4448,6 +4529,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const editModeToggleInlineBtn = document.getElementById('edit-mode-toggle-inline');
   const workspaceEl = document.getElementById('workspace');
   const workspaceResizerEl = document.getElementById('workspace-resizer');
+  const titleColResizerEl = document.getElementById('title-col-resizer');
+  const contentColResizerEl = document.getElementById('content-col-resizer');
+  const noteColResizerEl = document.getElementById('note-col-resizer');
+  const annualTitleColResizerEl = document.getElementById('annual-title-col-resizer');
+  const annualCustomerColResizerEl = document.getElementById('annual-customer-col-resizer');
+  const annualNoteColResizerEl = document.getElementById('annual-note-col-resizer');
   const editModeBarEl = document.getElementById('edit-mode-bar');
   const statementFrameEl = document.getElementById('statement-frame');
   const statementFrameBufferEl = document.getElementById('statement-frame-buffer');
@@ -4536,6 +4623,28 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   let statementFrameNeedsRefresh = false;
   let statementFrameRefreshTimer = 0;
   let annualEntriesLoadedYear = '';
+  let loadAllAbortController = null;
+  let loadAllRequestSeq = 0;
+  let latestAppliedLoadAllSeq = 0;
+  let keywordFilterTimer = 0;
+  const TITLE_COL_WIDTH_STORAGE_KEY = 'cashflow-title-col-width-v1';
+  const CONTENT_COL_WIDTH_STORAGE_KEY = 'cashflow-content-col-width-v1';
+  const NOTE_COL_WIDTH_STORAGE_KEY = 'cashflow-note-col-width-v1';
+  const ANNUAL_TITLE_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-title-col-width-v1';
+  const ANNUAL_CUSTOMER_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-customer-col-width-v1';
+  const ANNUAL_NOTE_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-note-col-width-v1';
+  const MIN_TITLE_COL_WIDTH = 140;
+  const MAX_TITLE_COL_WIDTH = 520;
+  const MIN_CONTENT_COL_WIDTH = 140;
+  const MAX_CONTENT_COL_WIDTH = 520;
+  const MIN_NOTE_COL_WIDTH = 120;
+  const MAX_NOTE_COL_WIDTH = 420;
+  const MIN_ANNUAL_TITLE_COL_WIDTH = 140;
+  const MAX_ANNUAL_TITLE_COL_WIDTH = 520;
+  const MIN_ANNUAL_CUSTOMER_COL_WIDTH = 120;
+  const MAX_ANNUAL_CUSTOMER_COL_WIDTH = 360;
+  const MIN_ANNUAL_NOTE_COL_WIDTH = 120;
+  const MAX_ANNUAL_NOTE_COL_WIDTH = 420;
   const EDIT_MODE_SPLIT_STORAGE_KEY = 'cashflow-edit-mode-split-v1';
   const MIN_EDIT_MODE_LEFT_PERCENT = 35;
   const MAX_EDIT_MODE_LEFT_PERCENT = 70;
@@ -4564,6 +4673,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   syncEditModeUi();
   syncListScrollWidth();
   syncListScrollPositionFromTable();
+  applyTitleColumnWidth(loadTitleColumnWidth());
+  applyContentColumnWidth(loadContentColumnWidth());
+  applyNoteColumnWidth(loadNoteColumnWidth());
+  applyAnnualTitleColumnWidth(loadAnnualTitleColumnWidth());
+  applyAnnualCustomerColumnWidth(loadAnnualCustomerColumnWidth());
+  applyAnnualNoteColumnWidth(loadAnnualNoteColumnWidth());
   applyWorkspaceSplit(loadWorkspaceSplitPercent());
 
   function initPeriodSelectors(d) {
@@ -4590,6 +4705,177 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const digits = normalizeAmountInputValue(value);
     if (!digits) return 0;
     return Number(digits);
+  }
+
+  function clampTitleColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 220;
+    return Math.min(MAX_TITLE_COL_WIDTH, Math.max(MIN_TITLE_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadTitleColumnWidth() {
+    try {
+      return clampTitleColumnWidth(localStorage.getItem(TITLE_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 220;
+    }
+  }
+
+  function saveTitleColumnWidth(value) {
+    try {
+      localStorage.setItem(TITLE_COL_WIDTH_STORAGE_KEY, String(clampTitleColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyTitleColumnWidth(value) {
+    const nextValue = clampTitleColumnWidth(value);
+    document.documentElement.style.setProperty('--list-title-col-width', nextValue + 'px');
+    syncListScrollWidth();
+    return nextValue;
+  }
+
+  function clampContentColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 180;
+    return Math.min(MAX_CONTENT_COL_WIDTH, Math.max(MIN_CONTENT_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadContentColumnWidth() {
+    try {
+      return clampContentColumnWidth(localStorage.getItem(CONTENT_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 180;
+    }
+  }
+
+  function saveContentColumnWidth(value) {
+    try {
+      localStorage.setItem(CONTENT_COL_WIDTH_STORAGE_KEY, String(clampContentColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyContentColumnWidth(value) {
+    const nextValue = clampContentColumnWidth(value);
+    document.documentElement.style.setProperty('--list-content-col-width', nextValue + 'px');
+    syncListScrollWidth();
+    return nextValue;
+  }
+
+  function clampNoteColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 140;
+    return Math.min(MAX_NOTE_COL_WIDTH, Math.max(MIN_NOTE_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadNoteColumnWidth() {
+    try {
+      return clampNoteColumnWidth(localStorage.getItem(NOTE_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 140;
+    }
+  }
+
+  function saveNoteColumnWidth(value) {
+    try {
+      localStorage.setItem(NOTE_COL_WIDTH_STORAGE_KEY, String(clampNoteColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyNoteColumnWidth(value) {
+    const nextValue = clampNoteColumnWidth(value);
+    document.documentElement.style.setProperty('--list-note-col-width', nextValue + 'px');
+    syncListScrollWidth();
+    return nextValue;
+  }
+
+  function clampAnnualTitleColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 220;
+    return Math.min(MAX_ANNUAL_TITLE_COL_WIDTH, Math.max(MIN_ANNUAL_TITLE_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadAnnualTitleColumnWidth() {
+    try {
+      return clampAnnualTitleColumnWidth(localStorage.getItem(ANNUAL_TITLE_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 220;
+    }
+  }
+
+  function saveAnnualTitleColumnWidth(value) {
+    try {
+      localStorage.setItem(ANNUAL_TITLE_COL_WIDTH_STORAGE_KEY, String(clampAnnualTitleColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyAnnualTitleColumnWidth(value) {
+    const nextValue = clampAnnualTitleColumnWidth(value);
+    document.documentElement.style.setProperty('--annual-title-col-width', nextValue + 'px');
+    return nextValue;
+  }
+
+  function clampAnnualCustomerColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 160;
+    return Math.min(MAX_ANNUAL_CUSTOMER_COL_WIDTH, Math.max(MIN_ANNUAL_CUSTOMER_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadAnnualCustomerColumnWidth() {
+    try {
+      return clampAnnualCustomerColumnWidth(localStorage.getItem(ANNUAL_CUSTOMER_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 160;
+    }
+  }
+
+  function saveAnnualCustomerColumnWidth(value) {
+    try {
+      localStorage.setItem(ANNUAL_CUSTOMER_COL_WIDTH_STORAGE_KEY, String(clampAnnualCustomerColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyAnnualCustomerColumnWidth(value) {
+    const nextValue = clampAnnualCustomerColumnWidth(value);
+    document.documentElement.style.setProperty('--annual-customer-col-width', nextValue + 'px');
+    return nextValue;
+  }
+
+  function clampAnnualNoteColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 160;
+    return Math.min(MAX_ANNUAL_NOTE_COL_WIDTH, Math.max(MIN_ANNUAL_NOTE_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadAnnualNoteColumnWidth() {
+    try {
+      return clampAnnualNoteColumnWidth(localStorage.getItem(ANNUAL_NOTE_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 160;
+    }
+  }
+
+  function saveAnnualNoteColumnWidth(value) {
+    try {
+      localStorage.setItem(ANNUAL_NOTE_COL_WIDTH_STORAGE_KEY, String(clampAnnualNoteColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyAnnualNoteColumnWidth(value) {
+    const nextValue = clampAnnualNoteColumnWidth(value);
+    document.documentElement.style.setProperty('--annual-note-col-width', nextValue + 'px');
+    return nextValue;
   }
 
   function syncAmountInputDisplay(input) {
@@ -4795,6 +5081,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
       if (annualRes.ok) annualEntriesLoadedYear = year;
     } catch (_) {
+      if (loadAllAbortController?.signal?.aborted) return;
       if (annualEntriesLoadedYear === '') {
         renderAnnualExpenses([]);
       }
@@ -5150,17 +5437,26 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   async function loadAll() {
     const month = selectedMonth();
     const year = String(yearInput.value);
+    if (loadAllAbortController) {
+      loadAllAbortController.abort();
+    }
+    loadAllAbortController = new AbortController();
+    const requestSeq = ++loadAllRequestSeq;
+    const { signal } = loadAllAbortController;
 
     try {
       const [summaryRes, entriesRes, openingRes] = await Promise.all([
-        fetch('/api/summary?month=' + encodeURIComponent(month)),
-        fetch('/api/entries?year=' + encodeURIComponent(year)),
-        fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'))
+        fetch('/api/summary?month=' + encodeURIComponent(month), { signal }),
+        fetch('/api/entries?year=' + encodeURIComponent(year), { signal }),
+        fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'), { signal })
       ]);
+      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) return false;
 
       const summary = summaryRes.ok ? await summaryRes.json() : { income: 0, expense: 0, balance: 0 };
       const entriesPayload = entriesRes.ok ? await entriesRes.json() : { entries: [] };
       const openingPayload = openingRes.ok ? await openingRes.json() : { openingBalance: 0 };
+      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) return false;
+      latestAppliedLoadAllSeq = requestSeq;
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
       syncMonthFilterOptions();
@@ -5191,6 +5487,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       }
       return entriesRes.ok;
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return false;
+      }
       console.error('loadAll failed', err);
       if (entries.length === 0) {
         showBanner(statusBanner, 'error', '一覧の取得に失敗しました。通信状態を確認して再読み込みしてください。');
@@ -5231,10 +5530,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       return '<tr>' +
       '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
       '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
-      '<td>' + escapeHtml(e.title || '') + '</td>' +
-      '<td>' + escapeHtml(e.customer_name || '') + '</td>' +
+      '<td data-annual-col="title">' + escapeHtml(e.title || '') + '</td>' +
+      '<td data-annual-col="customer_name">' + escapeHtml(e.customer_name || '') + '</td>' +
       '<td class="amount ' + e.type + '">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
-      '<td>' + escapeHtml(e.note || '') + '</td>' +
+      '<td data-annual-col="note">' + escapeHtml(e.note || '') + '</td>' +
       '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
       '</tr>'
     }).join('');
@@ -6017,6 +6316,144 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const applied = applyWorkspaceSplit(current + delta);
     saveWorkspaceSplitPercent(applied);
   });
+  titleColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadTitleColumnWidth();
+    titleColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyTitleColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveTitleColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        titleColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      titleColResizerEl.removeEventListener('pointermove', onMove);
+      titleColResizerEl.removeEventListener('pointerup', onEnd);
+      titleColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    titleColResizerEl.addEventListener('pointermove', onMove);
+    titleColResizerEl.addEventListener('pointerup', onEnd);
+    titleColResizerEl.addEventListener('pointercancel', onEnd);
+  });
+  contentColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadContentColumnWidth();
+    contentColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyContentColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveContentColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        contentColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      contentColResizerEl.removeEventListener('pointermove', onMove);
+      contentColResizerEl.removeEventListener('pointerup', onEnd);
+      contentColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    contentColResizerEl.addEventListener('pointermove', onMove);
+    contentColResizerEl.addEventListener('pointerup', onEnd);
+    contentColResizerEl.addEventListener('pointercancel', onEnd);
+  });
+  noteColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadNoteColumnWidth();
+    noteColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyNoteColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveNoteColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        noteColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      noteColResizerEl.removeEventListener('pointermove', onMove);
+      noteColResizerEl.removeEventListener('pointerup', onEnd);
+      noteColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    noteColResizerEl.addEventListener('pointermove', onMove);
+    noteColResizerEl.addEventListener('pointerup', onEnd);
+    noteColResizerEl.addEventListener('pointercancel', onEnd);
+  });
+  annualTitleColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadAnnualTitleColumnWidth();
+    annualTitleColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyAnnualTitleColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveAnnualTitleColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        annualTitleColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      annualTitleColResizerEl.removeEventListener('pointermove', onMove);
+      annualTitleColResizerEl.removeEventListener('pointerup', onEnd);
+      annualTitleColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    annualTitleColResizerEl.addEventListener('pointermove', onMove);
+    annualTitleColResizerEl.addEventListener('pointerup', onEnd);
+    annualTitleColResizerEl.addEventListener('pointercancel', onEnd);
+  });
+  annualCustomerColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadAnnualCustomerColumnWidth();
+    annualCustomerColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyAnnualCustomerColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveAnnualCustomerColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        annualCustomerColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      annualCustomerColResizerEl.removeEventListener('pointermove', onMove);
+      annualCustomerColResizerEl.removeEventListener('pointerup', onEnd);
+      annualCustomerColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    annualCustomerColResizerEl.addEventListener('pointermove', onMove);
+    annualCustomerColResizerEl.addEventListener('pointerup', onEnd);
+    annualCustomerColResizerEl.addEventListener('pointercancel', onEnd);
+  });
+  annualNoteColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadAnnualNoteColumnWidth();
+    annualNoteColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyAnnualNoteColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveAnnualNoteColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        annualNoteColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      annualNoteColResizerEl.removeEventListener('pointermove', onMove);
+      annualNoteColResizerEl.removeEventListener('pointerup', onEnd);
+      annualNoteColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    annualNoteColResizerEl.addEventListener('pointermove', onMove);
+    annualNoteColResizerEl.addEventListener('pointerup', onEnd);
+    annualNoteColResizerEl.addEventListener('pointercancel', onEnd);
+  });
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -6722,7 +7159,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   });
 
   listFilterKeywordEl?.addEventListener('input', () => {
-    renderRows();
+    if (keywordFilterTimer) window.clearTimeout(keywordFilterTimer);
+    keywordFilterTimer = window.setTimeout(() => {
+      keywordFilterTimer = 0;
+      renderRows();
+    }, 180);
   });
   listFilterMonthEl?.addEventListener('change', () => {
     syncDayFilterOptions();
