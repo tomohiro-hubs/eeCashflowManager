@@ -836,17 +836,43 @@ app.get('/api/annual-expense-entries', async (c) => {
   const { organizationId } = auth;
   const year = parseYear(c.req.query('year'));
   if (!year) return c.json({ error: 'Invalid year. Use YYYY.' }, 400);
+  const { startDate, endDate } = getYearDateRange(year);
+  const month = c.req.query('month');
+  const parsedMonth = month === 'all' || month === '' || month == null ? 'all' : parseMonth(month);
+  if (month && month !== 'all' && !parsedMonth) return c.json({ error: 'Invalid month. Use YYYY-MM.' }, 400);
+  if (parsedMonth !== 'all' && !parsedMonth.startsWith(`${year}-`)) {
+    return c.json({ error: 'Month must be within the selected year.' }, 400);
+  }
+  const monthRange = parsedMonth === 'all' ? null : getMonthDateRange(parsedMonth);
+  const listStartDate = monthRange?.startDate ?? startDate;
+  const listEndDate = monthRange?.endDate ?? endDate;
+
+  const carryRow = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as carry_balance
+     FROM cashflow_entries
+     WHERE organization_id = ?
+       AND deleted_at IS NULL
+       AND is_completed = 1
+       AND scheduled_date >= ?
+       AND scheduled_date < ?`
+  )
+    .bind(organizationId, startDate, listStartDate)
+    .first<{ carry_balance: number }>();
 
   const result = await c.env.DB.prepare(
-    `SELECT id, scheduled_date, title, amount, note, type, customer_name
+    `SELECT id, scheduled_date, title, content, amount, note, type, customer_name
      FROM cashflow_entries
-     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND substr(scheduled_date, 1, 4) = ?
+     WHERE organization_id = ?
+       AND deleted_at IS NULL
+       AND is_completed = 1
+       AND scheduled_date >= ?
+       AND scheduled_date < ?
      ORDER BY scheduled_date ASC, order_index ASC, id ASC`
   )
-    .bind(organizationId, year)
-    .all<{ id: number; scheduled_date: string; title: string; amount: number; note: string | null; type: 'income' | 'expense'; customer_name: string | null }>();
+    .bind(organizationId, listStartDate, listEndDate)
+    .all<{ id: number; scheduled_date: string; title: string; content: string | null; amount: number; note: string | null; type: 'income' | 'expense'; customer_name: string | null }>();
 
-  return c.json({ year, entries: result.results ?? [] });
+  return c.json({ year, month: parsedMonth, carryBalance: Number(carryRow?.carry_balance ?? 0), entries: result.results ?? [] });
 });
 
 app.get('/api/fiscal-range', async (c) => {
@@ -1052,14 +1078,18 @@ app.get('/api/entries', async (c) => {
   const { organizationId } = auth;
   const year = parseYear(c.req.query('year'));
   if (!year) return c.json({ error: 'Invalid year. Use YYYY.' }, 400);
+  const { startDate, endDate } = getYearDateRange(year);
 
   const result = await c.env.DB.prepare(
     `SELECT id, title, content, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no
      FROM cashflow_entries
-     WHERE organization_id = ? AND substr(scheduled_date, 1, 4) = ? AND deleted_at IS NULL
+     WHERE organization_id = ?
+       AND scheduled_date >= ?
+       AND scheduled_date < ?
+       AND deleted_at IS NULL
      ORDER BY scheduled_date ASC, order_index ASC, id ASC`
   )
-    .bind(organizationId, year)
+    .bind(organizationId, startDate, endDate)
     .all();
 
   return c.json({ year, entries: result.results ?? [] });
@@ -3227,11 +3257,6 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .header-warning-slot { max-width: 1800px; margin: 8px auto 0; padding: 0 20px; min-height: 34px; }
     .balance-alert { opacity: 0; transform: translateY(-2px); transition: opacity .15s ease, transform .15s ease; font-size: 12px; font-weight: 700; color: #7a5300; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 8px 10px; pointer-events: none; }
     .balance-alert.show { opacity: 1; transform: translateY(0); }
-    .debug-panel { max-width: 1800px; margin: 8px auto 0; padding: 0 20px; }
-    .debug-panel-inner { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border: 1px dashed #b9c8d9; border-radius: 10px; background: #f8fbff; color: #334e68; font-size: 12px; }
-    .debug-panel strong { display: block; font-size: 11px; color: #5b7087; margin-bottom: 3px; }
-    .debug-panel code { font-size: 12px; word-break: break-all; }
-
     .main { max-width: 1800px; margin: 18px auto; padding: 0 20px 40px; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 0 rgba(15, 47, 74, 0.04); }
     .topline { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -3426,11 +3451,32 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       min-width: var(--annual-title-col-width);
       max-width: var(--annual-title-col-width);
     }
+    #annual-section-body [data-annual-col="content"] {
+      width: var(--annual-content-col-width);
+      min-width: var(--annual-content-col-width);
+      max-width: var(--annual-content-col-width);
+    }
     #annual-section-body th:first-child,
     #annual-section-body td:first-child {
+      position: sticky;
+      left: 0;
       width: 110px;
       min-width: 110px;
       max-width: 110px;
+      white-space: nowrap;
+      background: #fff;
+      z-index: 1;
+    }
+    #annual-section-body thead th:first-child {
+      background: #f5f8fb;
+      z-index: 3;
+    }
+    #annual-section-body [data-annual-col="type"],
+    #annual-section-body [data-annual-col="amount"],
+    #annual-section-body [data-annual-col="running"] {
+      width: 1%;
+      min-width: max-content;
+      max-width: max-content;
       white-space: nowrap;
     }
     #annual-section-body [data-annual-col="customer_name"] {
@@ -3444,6 +3490,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       max-width: var(--annual-note-col-width);
     }
     #annual-section-body td[data-annual-col="title"],
+    #annual-section-body td[data-annual-col="content"],
     #annual-section-body td[data-annual-col="customer_name"],
     #annual-section-body td[data-annual-col="note"] {
       overflow: hidden;
@@ -3890,14 +3937,6 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 <div class="header-warning-slot">
   <div id="balance-alert" class="balance-alert">警告: 今月の差引がマイナスです。資金繰りを確認してください。</div>
 </div>
-<div class="debug-panel" aria-live="polite">
-  <div class="debug-panel-inner">
-    <div><strong>Debug org</strong><code id="debug-org-id">${escapeHtml(String(organizationId))}</code></div>
-    <div><strong>Debug summary</strong><code id="debug-summary">loading...</code></div>
-    <div><strong>Debug entries</strong><code id="debug-entries">loading...</code></div>
-  </div>
-</div>
-
   <main class="main">
     <div id="workspace" class="workspace">
     <div class="workspace-left">
@@ -3940,9 +3979,16 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       </div>
       <button id="toggle-annual" class="section-toggle" type="button">展開する</button>
     </div>
+    <div class="toolbar" style="margin-bottom:10px; gap:8px; align-items:center;">
+      <label for="annual-month-filter" class="muted">表示範囲</label>
+      <select id="annual-month-filter" aria-label="年間明細の表示月">
+        <option value="all">全件</option>
+      </select>
+      <span id="annual-filter-caption" class="muted">当月分を表示</span>
+    </div>
     <div id="annual-section-body" class="table-wrap collapsed">
       <table>
-        <thead><tr><th>日付</th><th>区分</th><th data-annual-col="title"><span class="resizable-col-head"><span>件名</span><button id="annual-title-col-resizer" class="col-resizer" type="button" aria-label="年間明細の件名列の幅を調整"></button></span></th><th data-annual-col="customer_name"><span class="resizable-col-head"><span>顧客名</span><button id="annual-customer-col-resizer" class="col-resizer" type="button" aria-label="年間明細の顧客名列の幅を調整"></button></span></th><th>金額</th><th data-annual-col="note"><span class="resizable-col-head"><span>メモ</span><button id="annual-note-col-resizer" class="col-resizer" type="button" aria-label="年間明細のメモ列の幅を調整"></button></span></th><th>残高</th></tr></thead>
+        <thead><tr><th>日付</th><th data-annual-col="type">区分</th><th data-annual-col="title"><span class="resizable-col-head"><span>件名</span><button id="annual-title-col-resizer" class="col-resizer" type="button" aria-label="年間明細の件名列の幅を調整"></button></span></th><th data-annual-col="content"><span class="resizable-col-head"><span>内容</span><button id="annual-content-col-resizer" class="col-resizer" type="button" aria-label="年間明細の内容列の幅を調整"></button></span></th><th data-annual-col="customer_name"><span class="resizable-col-head"><span>顧客名</span><button id="annual-customer-col-resizer" class="col-resizer" type="button" aria-label="年間明細の顧客名列の幅を調整"></button></span></th><th data-annual-col="amount">金額</th><th data-annual-col="note"><span class="resizable-col-head"><span>メモ</span><button id="annual-note-col-resizer" class="col-resizer" type="button" aria-label="年間明細のメモ列の幅を調整"></button></span></th><th data-annual-col="running">残高</th></tr></thead>
         <tbody id="annual-expense-rows"></tbody>
       </table>
     </div>
@@ -4469,6 +4515,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const annualExpenseRowsEl = document.getElementById('annual-expense-rows');
   const annualTodayDateEl = document.getElementById('annual-today-date');
   const annualTodayBalanceEl = document.getElementById('annual-today-balance');
+  const annualMonthFilterEl = document.getElementById('annual-month-filter');
+  const annualFilterCaptionEl = document.getElementById('annual-filter-caption');
   const loadSampleBtn = document.getElementById('load-sample');
   const clearSampleBtn = document.getElementById('clear-sample');
   const clearAllEntriesBtn = document.getElementById('clear-all-entries');
@@ -4533,6 +4581,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const contentColResizerEl = document.getElementById('content-col-resizer');
   const noteColResizerEl = document.getElementById('note-col-resizer');
   const annualTitleColResizerEl = document.getElementById('annual-title-col-resizer');
+  const annualContentColResizerEl = document.getElementById('annual-content-col-resizer');
   const annualCustomerColResizerEl = document.getElementById('annual-customer-col-resizer');
   const annualNoteColResizerEl = document.getElementById('annual-note-col-resizer');
   const editModeBarEl = document.getElementById('edit-mode-bar');
@@ -4622,7 +4671,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   let latestStatementFrameRefreshSeq = 0;
   let statementFrameNeedsRefresh = false;
   let statementFrameRefreshTimer = 0;
-  let annualEntriesLoadedYear = '';
+  let annualEntriesLoadedKey = '';
+  let annualDisplayCarryBalance = 0;
+  const annualEntriesCache = new Map();
+  const annualEntriesRequestCache = new Map();
   let loadAllAbortController = null;
   let loadAllRequestSeq = 0;
   let latestAppliedLoadAllSeq = 0;
@@ -4631,6 +4683,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const CONTENT_COL_WIDTH_STORAGE_KEY = 'cashflow-content-col-width-v1';
   const NOTE_COL_WIDTH_STORAGE_KEY = 'cashflow-note-col-width-v1';
   const ANNUAL_TITLE_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-title-col-width-v1';
+  const ANNUAL_CONTENT_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-content-col-width-v1';
   const ANNUAL_CUSTOMER_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-customer-col-width-v1';
   const ANNUAL_NOTE_COL_WIDTH_STORAGE_KEY = 'cashflow-annual-note-col-width-v1';
   const MIN_TITLE_COL_WIDTH = 140;
@@ -4641,6 +4694,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const MAX_NOTE_COL_WIDTH = 420;
   const MIN_ANNUAL_TITLE_COL_WIDTH = 140;
   const MAX_ANNUAL_TITLE_COL_WIDTH = 520;
+  const MIN_ANNUAL_CONTENT_COL_WIDTH = 140;
+  const MAX_ANNUAL_CONTENT_COL_WIDTH = 520;
   const MIN_ANNUAL_CUSTOMER_COL_WIDTH = 120;
   const MAX_ANNUAL_CUSTOMER_COL_WIDTH = 360;
   const MIN_ANNUAL_NOTE_COL_WIDTH = 120;
@@ -4667,6 +4722,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   initPeriodSelectors(now);
   syncFormDateWithMonth();
   syncEntryCfCategoryOptions();
+  syncAnnualMonthFilter();
   setMonthCaption();
   restoreEditMode();
   if (isEditMode) showEditModeColumns();
@@ -4677,6 +4733,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   applyContentColumnWidth(loadContentColumnWidth());
   applyNoteColumnWidth(loadNoteColumnWidth());
   applyAnnualTitleColumnWidth(loadAnnualTitleColumnWidth());
+  applyAnnualContentColumnWidth(loadAnnualContentColumnWidth());
   applyAnnualCustomerColumnWidth(loadAnnualCustomerColumnWidth());
   applyAnnualNoteColumnWidth(loadAnnualNoteColumnWidth());
   applyWorkspaceSplit(loadWorkspaceSplitPercent());
@@ -4689,6 +4746,85 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 
   function selectedMonth() {
     return String(yearInput.value) + '-' + fixedMonth;
+  }
+
+  function syncAnnualMonthFilter() {
+    if (!(annualMonthFilterEl instanceof HTMLSelectElement) || !(yearInput instanceof HTMLSelectElement)) return;
+    const defaultValue = String(yearInput.value) + '-' + fixedMonth;
+    annualMonthFilterEl.innerHTML = '<option value="all">全件</option>' +
+      Array.from({ length: 12 }, (_, i) => {
+        const mm = String(i + 1).padStart(2, '0');
+        const value = String(yearInput.value) + '-' + mm;
+        return '<option value="' + value + '">' + Number(mm) + '月</option>';
+      }).join('');
+    annualMonthFilterEl.value = defaultValue;
+    syncAnnualFilterCaption();
+  }
+
+  function syncAnnualFilterCaption() {
+    if (!(annualFilterCaptionEl instanceof HTMLElement) || !(annualMonthFilterEl instanceof HTMLSelectElement)) return;
+    const value = String(annualMonthFilterEl.value || 'all');
+    annualFilterCaptionEl.textContent = value === 'all'
+      ? '全件を表示'
+      : String(Number(value.slice(5, 7))) + '月分を表示';
+  }
+
+  function getAnnualEntriesSelection() {
+    const year = String(yearInput.value);
+    const monthFilter = annualMonthFilterEl instanceof HTMLSelectElement ? String(annualMonthFilterEl.value || 'all') : 'all';
+    const loadKey = year + ':' + monthFilter;
+    return { year, monthFilter, loadKey };
+  }
+
+  async function fetchAnnualEntriesPayload(options = {}) {
+    const { force = false } = options;
+    const { year, monthFilter, loadKey } = getAnnualEntriesSelection();
+    if (!force && annualEntriesCache.has(loadKey)) {
+      return { loadKey, payload: annualEntriesCache.get(loadKey), ok: true };
+    }
+    if (annualEntriesRequestCache.has(loadKey)) {
+      const payload = await annualEntriesRequestCache.get(loadKey);
+      return { loadKey, payload, ok: true };
+    }
+    const request = (async () => {
+      const params = new URLSearchParams({ year });
+      if (monthFilter) params.set('month', monthFilter);
+      const annualRes = await fetch('/api/annual-expense-entries?' + params.toString());
+      const payload = annualRes.ok ? await annualRes.json() : { entries: [], carryBalance: 0 };
+      if (annualRes.ok) {
+        annualEntriesCache.set(loadKey, payload);
+      }
+      return payload;
+    })();
+    annualEntriesRequestCache.set(loadKey, request);
+    try {
+      const payload = await request;
+      return { loadKey, payload, ok: true };
+    } catch (error) {
+      if (force) annualEntriesCache.delete(loadKey);
+      throw error;
+    } finally {
+      annualEntriesRequestCache.delete(loadKey);
+    }
+  }
+
+  function prefetchAnnualEntries() {
+    void fetchAnnualEntriesPayload({ force: true }).catch(() => {});
+  }
+
+  function invalidateAnnualEntriesCache() {
+    annualEntriesLoadedKey = '';
+    annualEntriesCache.clear();
+    annualEntriesRequestCache.clear();
+  }
+
+  async function refreshAnnualEntriesAfterMutation() {
+    invalidateAnnualEntriesCache();
+    if (annualSectionBody instanceof HTMLElement && !annualSectionBody.classList.contains('collapsed')) {
+      await loadAnnualEntries(true);
+    } else {
+      prefetchAnnualEntries();
+    }
   }
 
   function normalizeAmountInputValue(value) {
@@ -4819,6 +4955,34 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   function applyAnnualTitleColumnWidth(value) {
     const nextValue = clampAnnualTitleColumnWidth(value);
     document.documentElement.style.setProperty('--annual-title-col-width', nextValue + 'px');
+    return nextValue;
+  }
+
+  function clampAnnualContentColumnWidth(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 180;
+    return Math.min(MAX_ANNUAL_CONTENT_COL_WIDTH, Math.max(MIN_ANNUAL_CONTENT_COL_WIDTH, Math.round(nextValue)));
+  }
+
+  function loadAnnualContentColumnWidth() {
+    try {
+      return clampAnnualContentColumnWidth(localStorage.getItem(ANNUAL_CONTENT_COL_WIDTH_STORAGE_KEY));
+    } catch (_) {
+      return 180;
+    }
+  }
+
+  function saveAnnualContentColumnWidth(value) {
+    try {
+      localStorage.setItem(ANNUAL_CONTENT_COL_WIDTH_STORAGE_KEY, String(clampAnnualContentColumnWidth(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyAnnualContentColumnWidth(value) {
+    const nextValue = clampAnnualContentColumnWidth(value);
+    document.documentElement.style.setProperty('--annual-content-col-width', nextValue + 'px');
     return nextValue;
   }
 
@@ -5073,16 +5237,17 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   async function loadAnnualEntries(force = false) {
     if (!(annualSectionBody instanceof HTMLElement)) return;
     if (annualSectionBody.classList.contains('collapsed') && !force) return;
-    const year = String(yearInput.value);
-    if (!force && annualEntriesLoadedYear === year) return;
+    const { loadKey } = getAnnualEntriesSelection();
+    if (!force && annualEntriesLoadedKey === loadKey) return;
     try {
-      const annualRes = await fetch('/api/annual-expense-entries?year=' + encodeURIComponent(year));
-      const annualPayload = annualRes.ok ? await annualRes.json() : { entries: [] };
-      renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
-      if (annualRes.ok) annualEntriesLoadedYear = year;
+      const annualResult = await fetchAnnualEntriesPayload({ force });
+      annualDisplayCarryBalance = Number(annualResult.payload.carryBalance || 0);
+      renderAnnualExpenses(Array.isArray(annualResult.payload.entries) ? annualResult.payload.entries : []);
+      annualEntriesLoadedKey = annualResult.loadKey;
     } catch (_) {
       if (loadAllAbortController?.signal?.aborted) return;
-      if (annualEntriesLoadedYear === '') {
+      if (annualEntriesLoadedKey === '') {
+        annualDisplayCarryBalance = 0;
         renderAnnualExpenses([]);
       }
     }
@@ -5434,6 +5599,31 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
   }
 
+  function updateAnnualTodayBalanceFromEntries() {
+    const year = String(yearInput.value || '');
+    const yearStart = year ? year + '-01-01' : '';
+    const nextYearStart = year ? String(Number(year) + 1) + '-01-01' : '';
+    const todayIso = formatLocalDateIso(new Date());
+    const todayLabel = todayIso.replace(/-/g, '/');
+    if (annualTodayDateEl instanceof HTMLElement) {
+      annualTodayDateEl.textContent = todayLabel;
+    }
+    let todayBalance = openingBalance;
+    for (const entry of entries) {
+      const scheduledDate = String(entry.scheduled_date || '');
+      if (!scheduledDate || scheduledDate < yearStart || scheduledDate >= nextYearStart) continue;
+      if (Number(entry.is_completed) !== 1) continue;
+      if (scheduledDate > todayIso) continue;
+      const amount = Number(entry.amount || 0);
+      todayBalance += entry.type === 'income' ? amount : -amount;
+    }
+    if (annualTodayBalanceEl instanceof HTMLElement) {
+      annualTodayBalanceEl.textContent = (todayBalance > 0 ? '+' : '') + '¥' + fmt.format(todayBalance);
+      annualTodayBalanceEl.classList.remove('plus', 'minus');
+      annualTodayBalanceEl.classList.add(todayBalance < 0 ? 'minus' : 'plus');
+    }
+  }
+
   async function loadAll() {
     const month = selectedMonth();
     const year = String(yearInput.value);
@@ -5474,10 +5664,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       renderRows();
       syncListScrollPositionFromTable();
       updateSelectedMonthAlert();
+      updateAnnualTodayBalanceFromEntries();
       if (annualSectionBody instanceof HTMLElement && !annualSectionBody.classList.contains('collapsed')) {
         await loadAnnualEntries(true);
       } else {
-        annualEntriesLoadedYear = '';
+        annualEntriesLoadedKey = '';
+        prefetchAnnualEntries();
       }
       if (isEditMode && statementFrameNeedsRefresh) invalidateStatementFrame();
       if (!entriesRes.ok) {
@@ -5501,40 +5693,24 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   function renderAnnualExpenses(rows) {
-    const today = new Date();
-    const todayIso = today.toISOString().slice(0, 10);
-    const todayLabel = todayIso.replace(/-/g, '/');
-    if (annualTodayDateEl instanceof HTMLElement) {
-      annualTodayDateEl.textContent = todayLabel;
-    }
-    let todayBalance = openingBalance;
-    for (const entry of rows) {
-      const scheduledDate = String(entry.scheduled_date || '');
-      if (scheduledDate > todayIso) continue;
-      const amount = Number(entry.amount || 0);
-      todayBalance += entry.type === 'income' ? amount : -amount;
-    }
-    if (annualTodayBalanceEl instanceof HTMLElement) {
-      annualTodayBalanceEl.textContent = (todayBalance > 0 ? '+' : '') + '¥' + fmt.format(todayBalance);
-      annualTodayBalanceEl.classList.remove('plus', 'minus');
-      annualTodayBalanceEl.classList.add(todayBalance < 0 ? 'minus' : 'plus');
-    }
+    updateAnnualTodayBalanceFromEntries();
     if (rows.length === 0) {
-      annualExpenseRowsEl.innerHTML = '<tr><td colspan="7" class="muted">この年のデータはありません。</td></tr>';
+      annualExpenseRowsEl.innerHTML = '<tr><td colspan="8" class="muted">この年のデータはありません。</td></tr>';
       return;
     }
-    let annualRunning = openingBalance;
+    let annualRunning = openingBalance + annualDisplayCarryBalance;
     annualExpenseRowsEl.innerHTML = rows.map((e) => {
       const amount = Number(e.amount || 0);
       annualRunning += e.type === 'income' ? amount : -amount;
       return '<tr>' +
       '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
-      '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
+      '<td data-annual-col="type">' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
       '<td data-annual-col="title">' + escapeHtml(e.title || '') + '</td>' +
+      '<td data-annual-col="content">' + escapeHtml(e.content || '') + '</td>' +
       '<td data-annual-col="customer_name">' + escapeHtml(e.customer_name || '') + '</td>' +
-      '<td class="amount ' + e.type + '">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
+      '<td class="amount ' + e.type + '" data-annual-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
       '<td data-annual-col="note">' + escapeHtml(e.note || '') + '</td>' +
-      '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
+      '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '" data-annual-col="running">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
       '</tr>'
     }).join('');
   }
@@ -5545,7 +5721,14 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
     const d = new Date(v);
     if (Number.isNaN(d.getTime())) return '';
-    return d.toISOString().slice(0, 10);
+    return formatLocalDateIso(d);
+  }
+
+  function formatLocalDateIso(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return year + '-' + month + '-' + day;
   }
 
   function syncMonthFilterOptions() {
@@ -5853,6 +6036,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       }
       showBanner(statusBanner, 'ok', successMessage.replace('{count}', String(ids.length)));
       selectedEntryIds.clear();
+      invalidateAnnualEntriesCache();
       await loadAll();
       return true;
     } catch (_) {
@@ -6010,6 +6194,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         return;
       }
       invalidateStatementFrame();
+      invalidateAnnualEntriesCache();
       showBanner(statusBanner, 'ok', '予定を削除しました。');
       await loadAll();
     } catch (_) {
@@ -6028,6 +6213,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       }
       patchEntryInMemory(id, { is_completed: Number(target.is_completed) === 1 ? 0 : 1 });
       patchRenderedRow(id);
+      await refreshAnnualEntriesAfterMutation();
     } catch (_) {
       showBanner(statusBanner, 'error', '完了処理中に通信エラーが発生しました。');
     }
@@ -6057,6 +6243,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       invalidateStatementFrame();
       patchEntryInMemory(id, { scheduled_date: normalized });
       patchRenderedRow(id);
+      await refreshAnnualEntriesAfterMutation();
     } catch (_) {
       showBanner(statusBanner, 'error', '日付更新中に通信エラーが発生しました。');
     }
@@ -6259,6 +6446,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       }
       invalidateStatementFrame();
       closeEntryEditModal();
+      invalidateAnnualEntriesCache();
       const refreshed = await loadAll();
       if (refreshed) {
         showBanner(statusBanner, 'ok', '予定を更新しました。');
@@ -6408,6 +6596,29 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     annualTitleColResizerEl.addEventListener('pointerup', onEnd);
     annualTitleColResizerEl.addEventListener('pointercancel', onEnd);
   });
+  annualContentColResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    ev.preventDefault();
+    const startX = ev.clientX;
+    const startWidth = loadAnnualContentColumnWidth();
+    annualContentColResizerEl.setPointerCapture?.(ev.pointerId);
+    const onMove = (moveEv) => {
+      if (!(moveEv instanceof PointerEvent)) return;
+      const applied = applyAnnualContentColumnWidth(startWidth + (moveEv.clientX - startX));
+      saveAnnualContentColumnWidth(applied);
+    };
+    const onEnd = (endEv) => {
+      if (endEv instanceof PointerEvent) {
+        annualContentColResizerEl.releasePointerCapture?.(endEv.pointerId);
+      }
+      annualContentColResizerEl.removeEventListener('pointermove', onMove);
+      annualContentColResizerEl.removeEventListener('pointerup', onEnd);
+      annualContentColResizerEl.removeEventListener('pointercancel', onEnd);
+    };
+    annualContentColResizerEl.addEventListener('pointermove', onMove);
+    annualContentColResizerEl.addEventListener('pointerup', onEnd);
+    annualContentColResizerEl.addEventListener('pointercancel', onEnd);
+  });
   annualCustomerColResizerEl?.addEventListener('pointerdown', (ev) => {
     if (!(ev instanceof PointerEvent)) return;
     ev.preventDefault();
@@ -6510,7 +6721,19 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   yearInput.addEventListener('change', async () => {
     setMonthCaption();
     syncFormDateWithMonth();
+    syncAnnualMonthFilter();
+    annualEntriesLoadedKey = '';
     await loadAll();
+  });
+
+  annualMonthFilterEl?.addEventListener('change', async () => {
+    syncAnnualFilterCaption();
+    annualEntriesLoadedKey = '';
+    if (annualSectionBody instanceof HTMLElement && !annualSectionBody.classList.contains('collapsed')) {
+      await loadAnnualEntries(true);
+    } else {
+      prefetchAnnualEntries();
+    }
   });
 
   entryTypeEl?.addEventListener('change', () => {
@@ -9166,6 +9389,23 @@ function parseYear(year?: string | null): string | null {
   const y = (year ?? '').trim();
   if (!/^\d{4}$/.test(y)) return null;
   return y;
+}
+
+function getYearDateRange(year: string): { startDate: string; endDate: string } {
+  return {
+    startDate: `${year}-01-01`,
+    endDate: `${String(Number(year) + 1)}-01-01`
+  };
+}
+
+function getMonthDateRange(month: string): { startDate: string; endDate: string } {
+  const [year, mm] = month.split('-');
+  const current = new Date(Date.UTC(Number(year), Number(mm) - 1, 1));
+  const next = new Date(Date.UTC(Number(year), Number(mm), 1));
+  return {
+    startDate: current.toISOString().slice(0, 10),
+    endDate: next.toISOString().slice(0, 10)
+  };
 }
 
 function parseDateOnly(date?: string | null): string | null {

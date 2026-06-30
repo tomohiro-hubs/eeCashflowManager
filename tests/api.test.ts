@@ -361,6 +361,48 @@ describe('entries api', () => {
     );
   });
 
+  it('filters annual entries by month and returns carry balance within the year', async () => {
+    const cookie = await createAuthedCookie();
+    await createEntry(cookie, {
+      title: 'March Income',
+      amount: 1000,
+      type: 'income',
+      scheduledDate: '2026-03-10'
+    });
+    await createEntry(cookie, {
+      title: 'April Expense',
+      amount: 700,
+      type: 'expense',
+      scheduledDate: '2026-04-11'
+    });
+
+    const listed = await fetchApp('/api/entries?year=2026', { headers: { cookie } });
+    const listedPayload = await listed.json<{ entries: Array<{ id: number; title: string }> }>();
+    const ids = listedPayload.entries
+      .filter((e) => e.title === 'March Income' || e.title === 'April Expense')
+      .map((e) => e.id);
+    expect(ids).toHaveLength(2);
+
+    const completeRes = await fetchApp('/api/entries/bulk', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ ids, action: 'set_completed', isCompleted: true })
+    });
+    expect(completeRes.status).toBe(200);
+
+    const annualRes = await fetchApp('/api/annual-expense-entries?year=2026&month=2026-04', {
+      headers: { cookie }
+    });
+    expect(annualRes.status).toBe(200);
+
+    const annualPayload = await annualRes.json<{ month: string; carryBalance: number; entries: Array<{ title: string }> }>();
+    expect(annualPayload.month).toBe('2026-04');
+    expect(annualPayload.carryBalance).toBe(1000);
+    expect(annualPayload.entries).toEqual([
+      expect.objectContaining({ title: 'April Expense' })
+    ]);
+  });
+
   it('returns 400 for invalid create payload', async () => {
     const cookie = await createAuthedCookie();
 
