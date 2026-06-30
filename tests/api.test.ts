@@ -352,11 +352,11 @@ describe('entries api', () => {
     });
     expect(annualRes.status).toBe(200);
 
-    const annualPayload = await annualRes.json<{ entries: Array<{ title: string; type: 'income' | 'expense' }> }>();
+    const annualPayload = await annualRes.json<{ entries: Array<{ title: string; type: 'income' | 'expense'; customer_name: string | null }> }>();
     expect(annualPayload.entries).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ title: 'Annual Income', type: 'income' }),
-        expect.objectContaining({ title: 'Annual Expense', type: 'expense' })
+        expect.objectContaining({ title: 'Annual Income', type: 'income', customer_name: null }),
+        expect.objectContaining({ title: 'Annual Expense', type: 'expense', customer_name: null })
       ])
     );
   });

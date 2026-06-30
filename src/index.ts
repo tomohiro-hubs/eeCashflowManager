@@ -838,13 +838,13 @@ app.get('/api/annual-expense-entries', async (c) => {
   if (!year) return c.json({ error: 'Invalid year. Use YYYY.' }, 400);
 
   const result = await c.env.DB.prepare(
-    `SELECT id, scheduled_date, title, amount, note, type
+    `SELECT id, scheduled_date, title, amount, note, type, customer_name
      FROM cashflow_entries
      WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND substr(scheduled_date, 1, 4) = ?
      ORDER BY scheduled_date ASC, order_index ASC, id ASC`
   )
     .bind(organizationId, year)
-    .all<{ id: number; scheduled_date: string; title: string; amount: number; note: string | null; type: 'income' | 'expense' }>();
+    .all<{ id: number; scheduled_date: string; title: string; amount: number; note: string | null; type: 'income' | 'expense'; customer_name: string | null }>();
 
   return c.json({ year, entries: result.results ?? [] });
 });
@@ -3238,12 +3238,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       border: 1px solid #d7e0ea;
       border-radius: 999px;
       background: #f8fbff;
-      font-size: 12px;
+      font-size: 14px;
       color: #48617a;
     }
     .annual-metric strong {
       color: #1f2937;
-      font-size: 14px;
+      font-size: 18px;
       font-variant-numeric: tabular-nums;
     }
     .annual-metric strong.plus { color: var(--income); }
@@ -3307,6 +3307,36 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .banner.error { background: var(--err-bg); border: 1px solid var(--err-line); color: #7f1d1d; }
     .banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: #7a5300; }
     .banner.ok { background: var(--ok-bg); border: 1px solid var(--ok-line); color: #155e36; }
+    .section-anchor {
+      display: block;
+      position: relative;
+      top: -88px;
+      visibility: hidden;
+    }
+    .back-to-form {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 40;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 136px;
+      padding: 12px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(11, 53, 88, 0.18);
+      background: rgba(255, 255, 255, 0.96);
+      color: var(--accent-deep);
+      box-shadow: 0 12px 28px rgba(10, 36, 64, 0.16);
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      backdrop-filter: blur(6px);
+    }
+    .back-to-form:hover {
+      background: #ffffff;
+      color: var(--accent);
+    }
 
     .table-wrap { overflow: auto; border: 1px solid #e1e8f0; border-radius: 10px; }
     table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
@@ -3364,9 +3394,57 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .label-pink { background: #ec4899; }
     .label-gray { background: #94a3b8; }
     .label-lightblue { background: #38bdf8; }
-    .workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
-    .workspace.is-edit-mode { grid-template-columns: minmax(0, 1.08fr) minmax(460px, .92fr); align-items: start; }
+    .workspace {
+      --workspace-left-width: minmax(0, 1fr);
+      --workspace-right-width: minmax(460px, .92fr);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+    }
+    .workspace.is-edit-mode {
+      grid-template-columns: var(--workspace-left-width) 12px var(--workspace-right-width);
+      gap: 10px;
+      align-items: start;
+    }
     .workspace-left { min-width: 0; }
+    .workspace-resizer {
+      display: none;
+      position: sticky;
+      top: 18px;
+      align-self: stretch;
+      min-height: calc(100vh - 36px);
+      cursor: col-resize;
+      user-select: none;
+      touch-action: none;
+      z-index: 21;
+    }
+    .workspace-resizer::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(15, 76, 129, 0.06) 0%, rgba(15, 76, 129, 0.14) 100%);
+      transition: background .15s ease, box-shadow .15s ease;
+    }
+    .workspace-resizer::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 4px;
+      height: 64px;
+      transform: translate(-50%, -50%);
+      border-radius: 999px;
+      background: rgba(11, 53, 88, 0.34);
+      box-shadow: 0 0 0 1px rgba(255,255,255,.7);
+    }
+    .workspace-resizer:hover::before,
+    .workspace-resizer:focus-visible::before,
+    .workspace.is-resizing .workspace-resizer::before {
+      background: linear-gradient(180deg, rgba(15, 76, 129, 0.14) 0%, rgba(15, 76, 129, 0.24) 100%);
+      box-shadow: 0 0 0 1px rgba(15, 76, 129, 0.16);
+    }
+    .workspace.is-edit-mode .workspace-resizer { display: block; }
     .workspace-right { display: none; min-width: 0; align-self: start; }
     .workspace.is-edit-mode .workspace-right { display: block; position: sticky; top: 18px; }
     .edit-mode-bar {
@@ -3464,6 +3542,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       .summary { grid-template-columns: repeat(3, minmax(100px, 1fr)); }
       .row { grid-template-columns: 1fr 1fr; }
       .workspace.is-edit-mode { grid-template-columns: 1fr; }
+      .workspace-resizer { display: none !important; }
       .workspace-right-panel { position: static; height: auto; max-height: none; overflow: visible; }
       .workspace-right-frame { min-height: 560px; height: 560px; }
       .list-scroll-sync { position: static; }
@@ -3773,7 +3852,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     <section class="panel">
     <div class="topline">
       <strong>年間入出金データ（明細）</strong>
-      <span class="muted">選択中の年の完了済み入出金データを表示します。残高は0起点で計算します。</span>
+      <span class="muted">選択中の年の完了済み入出金データを表示します。残高は年初以前を含む累計で計算します。</span>
       <div class="annual-topline-meta" aria-live="polite">
         <span class="annual-metric">本日 <strong id="annual-today-date">-</strong></span>
         <span class="annual-metric">本日時点残高 <strong id="annual-today-balance">¥0</strong></span>
@@ -3782,12 +3861,13 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     </div>
     <div id="annual-section-body" class="table-wrap collapsed">
       <table>
-        <thead><tr><th>日付</th><th>区分</th><th>件名</th><th>金額</th><th>メモ</th><th>残高</th></tr></thead>
+        <thead><tr><th>日付</th><th>区分</th><th>件名</th><th>顧客名</th><th>金額</th><th>メモ</th><th>残高</th></tr></thead>
         <tbody id="annual-expense-rows"></tbody>
       </table>
     </div>
   </section>
 
+  <span id="entry-form-anchor" class="section-anchor" aria-hidden="true"></span>
   <section class="panel">
     <div class="topline"><strong>入出金予定の追加</strong><span class="muted">金額は整数（円）で入力</span></div>
     <div class="toolbar" style="margin-bottom:10px;">
@@ -3810,12 +3890,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       </div>
       <div class="field" data-form-field="amount">
         <label for="f-amount">金額</label>
-        <input id="f-amount" name="amount" type="number" step="1" min="1" placeholder="例: 120000" required />
+        <input id="f-amount" name="amount" type="text" inputmode="numeric" placeholder="例: 120,000" required />
         <div class="field-hint" data-hint-for="amount">1円以上の整数</div>
       </div>
       <div class="field" data-form-field="type">
         <label for="f-type">区分</label>
-        <select id="f-type" name="type"><option value="income">入金</option><option value="expense">出金</option></select>
+        <select id="f-type" name="type"><option value="income">入金</option><option value="expense" selected>出金</option></select>
         <div class="field-hint" data-hint-for="type">入金 / 出金</div>
       </div>
       <div class="field" data-form-field="labelColor">
@@ -3868,6 +3948,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       </div>
     </form>
   </section>
+  <a href="#entry-form-anchor" class="back-to-form" aria-label="入出金予定の追加へ戻る">一番上に戻る</a>
 
   <section class="panel">
     <div class="topline">
@@ -3955,6 +4036,17 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     </div>
     </section>
   </div>
+  <div
+    id="workspace-resizer"
+    class="workspace-resizer"
+    role="separator"
+    aria-label="左右ペインの幅を調整"
+    aria-orientation="vertical"
+    aria-valuemin="35"
+    aria-valuemax="70"
+    aria-valuenow="54"
+    tabindex="0"
+  ></div>
   <aside id="workspace-right" class="workspace-right" aria-label="資金繰り表編集モード">
     <div class="workspace-right-panel">
       <div class="workspace-right-head">
@@ -3964,8 +4056,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         </div>
       </div>
       <div class="workspace-right-frame-stack">
-        <iframe id="statement-frame" class="workspace-right-frame" title="資金繰り表編集ビュー" loading="eager" src="/cashflow-statement?embedded=1" data-src="/cashflow-statement?embedded=1"></iframe>
-        <iframe id="statement-frame-buffer" class="workspace-right-frame is-hidden" title="資金繰り表編集ビュー（読み込み用）" loading="eager" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
+        <iframe id="statement-frame" class="workspace-right-frame" title="資金繰り表編集ビュー" loading="lazy" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
+        <iframe id="statement-frame-buffer" class="workspace-right-frame is-hidden" title="資金繰り表編集ビュー（読み込み用）" loading="lazy" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
       </div>
     </div>
   </aside>
@@ -4159,7 +4251,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         </div>
         <div class="field">
           <label for="entry-edit-amount">金額</label>
-          <input id="entry-edit-amount" name="amount" type="number" step="1" min="1" required />
+          <input id="entry-edit-amount" name="amount" type="text" inputmode="numeric" required />
           <div class="field-hint">1円以上の整数</div>
         </div>
         <div class="field">
@@ -4355,6 +4447,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const editModeToggleBtn = document.getElementById('edit-mode-toggle');
   const editModeToggleInlineBtn = document.getElementById('edit-mode-toggle-inline');
   const workspaceEl = document.getElementById('workspace');
+  const workspaceResizerEl = document.getElementById('workspace-resizer');
   const editModeBarEl = document.getElementById('edit-mode-bar');
   const statementFrameEl = document.getElementById('statement-frame');
   const statementFrameBufferEl = document.getElementById('statement-frame-buffer');
@@ -4442,6 +4535,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   let latestStatementFrameRefreshSeq = 0;
   let statementFrameNeedsRefresh = false;
   let statementFrameRefreshTimer = 0;
+  let annualEntriesLoadedYear = '';
+  const EDIT_MODE_SPLIT_STORAGE_KEY = 'cashflow-edit-mode-split-v1';
+  const MIN_EDIT_MODE_LEFT_PERCENT = 35;
+  const MAX_EDIT_MODE_LEFT_PERCENT = 70;
   const LIST_COLUMN_STORAGE_KEY = 'cashflow-list-hidden-columns-v1';
   const LIST_COLUMN_HIDE_PRESET = ['label', 'cf_category', 'note', 'actual_date', 'customer_name', 'staff_name', 'running', 'actions'];
   const LIST_COLUMN_LABELS = new Map([
@@ -4467,6 +4564,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   syncEditModeUi();
   syncListScrollWidth();
   syncListScrollPositionFromTable();
+  applyWorkspaceSplit(loadWorkspaceSplitPercent());
 
   function initPeriodSelectors(d) {
     const y = d.getFullYear();
@@ -4476,6 +4574,72 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 
   function selectedMonth() {
     return String(yearInput.value) + '-' + fixedMonth;
+  }
+
+  function normalizeAmountInputValue(value) {
+    return String(value || '').replace(/[^\d]/g, '');
+  }
+
+  function formatAmountInputValue(value) {
+    const digits = normalizeAmountInputValue(value);
+    if (!digits) return '';
+    return fmt.format(Number(digits));
+  }
+
+  function parseAmountInputValue(value) {
+    const digits = normalizeAmountInputValue(value);
+    if (!digits) return 0;
+    return Number(digits);
+  }
+
+  function syncAmountInputDisplay(input) {
+    if (!(input instanceof HTMLInputElement)) return;
+    input.value = formatAmountInputValue(input.value);
+  }
+
+  function clampWorkspaceSplitPercent(value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return 54;
+    return Math.min(MAX_EDIT_MODE_LEFT_PERCENT, Math.max(MIN_EDIT_MODE_LEFT_PERCENT, nextValue));
+  }
+
+  function loadWorkspaceSplitPercent() {
+    try {
+      return clampWorkspaceSplitPercent(localStorage.getItem(EDIT_MODE_SPLIT_STORAGE_KEY));
+    } catch (_) {
+      return 54;
+    }
+  }
+
+  function saveWorkspaceSplitPercent(value) {
+    try {
+      localStorage.setItem(EDIT_MODE_SPLIT_STORAGE_KEY, String(clampWorkspaceSplitPercent(value)));
+    } catch (_) {
+      // 保存不能環境では無視
+    }
+  }
+
+  function applyWorkspaceSplit(value) {
+    const nextValue = clampWorkspaceSplitPercent(value);
+    if (workspaceEl instanceof HTMLElement) {
+      workspaceEl.style.setProperty('--workspace-left-width', 'minmax(0, ' + nextValue + '%)');
+      workspaceEl.style.setProperty('--workspace-right-width', 'minmax(460px, calc(100% - ' + nextValue + '%))');
+    }
+    if (workspaceResizerEl instanceof HTMLElement) {
+      workspaceResizerEl.setAttribute('aria-valuenow', String(Math.round(nextValue)));
+    }
+    return nextValue;
+  }
+
+  function updateWorkspaceSplitFromPointer(clientX) {
+    if (!(workspaceEl instanceof HTMLElement)) return;
+    if (window.innerWidth <= 1000) return;
+    const rect = workspaceEl.getBoundingClientRect();
+    const totalWidth = rect.width - 12;
+    if (totalWidth <= 0) return;
+    const nextPercent = ((clientX - rect.left) / totalWidth) * 100;
+    const applied = applyWorkspaceSplit(nextPercent);
+    saveWorkspaceSplitPercent(applied);
   }
 
   function showBanner(el, type, message) {
@@ -4546,6 +4710,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (workspaceEl instanceof HTMLElement) {
       workspaceEl.classList.toggle('is-edit-mode', isEditMode);
     }
+    if (workspaceResizerEl instanceof HTMLElement) {
+      workspaceResizerEl.setAttribute('aria-hidden', isEditMode ? 'false' : 'true');
+    }
     if (editModeBarEl instanceof HTMLElement) {
       editModeBarEl.setAttribute('aria-hidden', isEditMode ? 'false' : 'true');
     }
@@ -4562,6 +4729,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
     if (hiddenStatementFrameEl instanceof HTMLIFrameElement) {
       hiddenStatementFrameEl.style.visibility = 'hidden';
+    }
+    if (isEditMode) {
+      applyWorkspaceSplit(loadWorkspaceSplitPercent());
     }
   }
 
@@ -4587,6 +4757,21 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     isSyncingListScroll = false;
   }
 
+  function beginWorkspaceResize(pointerId) {
+    if (!(workspaceEl instanceof HTMLElement) || !(workspaceResizerEl instanceof HTMLElement)) return;
+    workspaceEl.classList.add('is-resizing');
+    workspaceResizerEl.setPointerCapture?.(pointerId);
+  }
+
+  function finishWorkspaceResize(pointerId) {
+    if (workspaceEl instanceof HTMLElement) {
+      workspaceEl.classList.remove('is-resizing');
+    }
+    if (workspaceResizerEl instanceof HTMLElement && pointerId != null) {
+      workspaceResizerEl.releasePointerCapture?.(pointerId);
+    }
+  }
+
   function hasStatementFrameSource(frame) {
     if (!(frame instanceof HTMLIFrameElement)) return false;
     const src = String(frame.getAttribute('src') || frame.src || '');
@@ -4597,6 +4782,23 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const frame = event.target;
     if (!(frame instanceof HTMLIFrameElement) || !hasStatementFrameSource(frame)) return;
     statementFrameNeedsRefresh = false;
+  }
+
+  async function loadAnnualEntries(force = false) {
+    if (!(annualSectionBody instanceof HTMLElement)) return;
+    if (annualSectionBody.classList.contains('collapsed') && !force) return;
+    const year = String(yearInput.value);
+    if (!force && annualEntriesLoadedYear === year) return;
+    try {
+      const annualRes = await fetch('/api/annual-expense-entries?year=' + encodeURIComponent(year));
+      const annualPayload = annualRes.ok ? await annualRes.json() : { entries: [] };
+      renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
+      if (annualRes.ok) annualEntriesLoadedYear = year;
+    } catch (_) {
+      if (annualEntriesLoadedYear === '') {
+        renderAnnualExpenses([]);
+      }
+    }
   }
 
   function invalidateStatementFrame() {
@@ -4744,7 +4946,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (entryEditId instanceof HTMLInputElement) entryEditId.value = String(entry.id);
     if (entryEditTitle instanceof HTMLInputElement) entryEditTitle.value = String(entry.title || '');
     if (entryEditContent instanceof HTMLInputElement) entryEditContent.value = String(entry.content || '');
-    if (entryEditAmount instanceof HTMLInputElement) entryEditAmount.value = String(Number(entry.amount || 0));
+    if (entryEditAmount instanceof HTMLInputElement) entryEditAmount.value = formatAmountInputValue(entry.amount || 0);
     if (entryEditType instanceof HTMLSelectElement) entryEditType.value = String(entry.type || 'income');
     if (entryEditLabelColor instanceof HTMLSelectElement) entryEditLabelColor.value = String(entry.label_color || 'blue');
     if (entryEditScheduledDate instanceof HTMLInputElement) entryEditScheduledDate.value = String(entry.scheduled_date || '');
@@ -4953,14 +5155,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       const [summaryRes, entriesRes, openingRes] = await Promise.all([
         fetch('/api/summary?month=' + encodeURIComponent(month)),
         fetch('/api/entries?year=' + encodeURIComponent(year)),
-        fetch('/api/opening-balance?month=' + encodeURIComponent(month))
+        fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'))
       ]);
-      const annualRes = await fetch('/api/annual-expense-entries?year=' + encodeURIComponent(year));
 
       const summary = summaryRes.ok ? await summaryRes.json() : { income: 0, expense: 0, balance: 0 };
       const entriesPayload = entriesRes.ok ? await entriesRes.json() : { entries: [] };
       const openingPayload = openingRes.ok ? await openingRes.json() : { openingBalance: 0 };
-      const annualPayload = annualRes.ok ? await annualRes.json() : { entries: [] };
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
       syncMonthFilterOptions();
@@ -4978,7 +5178,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       renderRows();
       syncListScrollPositionFromTable();
       updateSelectedMonthAlert();
-      renderAnnualExpenses(Array.isArray(annualPayload.entries) ? annualPayload.entries : []);
+      if (annualSectionBody instanceof HTMLElement && !annualSectionBody.classList.contains('collapsed')) {
+        await loadAnnualEntries(true);
+      } else {
+        annualEntriesLoadedYear = '';
+      }
       if (isEditMode && statementFrameNeedsRefresh) invalidateStatementFrame();
       if (!entriesRes.ok) {
         showBanner(statusBanner, 'error', '一覧データの取得に失敗しました。再読み込みしてください。');
@@ -5004,7 +5208,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     if (annualTodayDateEl instanceof HTMLElement) {
       annualTodayDateEl.textContent = todayLabel;
     }
-    let todayBalance = 0;
+    let todayBalance = openingBalance;
     for (const entry of rows) {
       const scheduledDate = String(entry.scheduled_date || '');
       if (scheduledDate > todayIso) continue;
@@ -5017,10 +5221,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       annualTodayBalanceEl.classList.add(todayBalance < 0 ? 'minus' : 'plus');
     }
     if (rows.length === 0) {
-      annualExpenseRowsEl.innerHTML = '<tr><td colspan="6" class="muted">この年のデータはありません。</td></tr>';
+      annualExpenseRowsEl.innerHTML = '<tr><td colspan="7" class="muted">この年のデータはありません。</td></tr>';
       return;
     }
-    let annualRunning = 0;
+    let annualRunning = openingBalance;
     annualExpenseRowsEl.innerHTML = rows.map((e) => {
       const amount = Number(e.amount || 0);
       annualRunning += e.type === 'income' ? amount : -amount;
@@ -5028,6 +5232,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
       '<td>' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
       '<td>' + escapeHtml(e.title || '') + '</td>' +
+      '<td>' + escapeHtml(e.customer_name || '') + '</td>' +
       '<td class="amount ' + e.type + '">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
       '<td>' + escapeHtml(e.note || '') + '</td>' +
       '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
@@ -5188,7 +5393,18 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     entries = entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
   }
 
-  function renderEntryRowHtml(e, idx, running, entryRunning) {
+  function buildRunningBalanceMap() {
+    const runningById = new Map();
+    let running = openingBalance;
+    for (const entry of entries) {
+      const amount = Number(entry.amount || 0);
+      running += entry.type === 'income' ? amount : -amount;
+      runningById.set(entry.id, running);
+    }
+    return runningById;
+  }
+
+  function renderEntryRowHtml(e, idx, entryRunning) {
     const amount = Number(e.amount);
     const runningClass = entryRunning < 0 ? 'minus' : 'plus';
     const rowClass = Number(e.is_completed) === 1 ? 'completed' : '';
@@ -5257,13 +5473,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       renderRows();
       return;
     }
-    const runningById = new Map();
-    let running = openingBalance;
-    for (const item of filtered) {
-      const amount = Number(item.amount || 0);
-      running += item.type === 'income' ? amount : -amount;
-      runningById.set(item.id, running);
-    }
+    const runningById = buildRunningBalanceMap();
     const entryRunning = Number(runningById.get(id) || 0);
     const nodes = rowsEl.querySelectorAll('tr[data-entry-id="' + id + '"], tr[data-parent-id="' + id + '"]');
     const existingMainRow = rowsEl.querySelector('tr[data-entry-id="' + id + '"]');
@@ -5271,7 +5481,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       renderRows();
       return;
     }
-    const rendered = renderEntryRowHtml(entry, filteredIndex, running, entryRunning);
+    const rendered = renderEntryRowHtml(entry, filteredIndex, entryRunning);
     existingMainRow.outerHTML = rendered.rowHtml + rendered.detailHtml;
     if (nodes.length > 0) {
       syncListScrollWidth();
@@ -5312,17 +5522,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       return;
     }
 
-    const runningById = new Map();
-    let running = openingBalance;
-    for (const entry of filtered) {
-      const amount = Number(entry.amount || 0);
-      running += entry.type === 'income' ? amount : -amount;
-      runningById.set(entry.id, running);
-    }
+    const runningById = buildRunningBalanceMap();
 
     rowsEl.innerHTML = filtered.map((e, idx) => {
       const entryRunning = Number(runningById.get(e.id) || 0);
-      const rendered = renderEntryRowHtml(e, idx, running, entryRunning);
+      const rendered = renderEntryRowHtml(e, idx, entryRunning);
       return rendered.rowHtml + rendered.detailHtml;
     }).join('');
     applyListColumnVisibility();
@@ -5586,7 +5790,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     return {
       title: String(entryEditTitle instanceof HTMLInputElement ? entryEditTitle.value : '').trim(),
       content: String(entryEditContent instanceof HTMLInputElement ? entryEditContent.value : '').trim(),
-      amount: Number(entryEditAmount instanceof HTMLInputElement ? entryEditAmount.value : 0),
+      amount: parseAmountInputValue(entryEditAmount instanceof HTMLInputElement ? entryEditAmount.value : 0),
       type: String(entryEditType instanceof HTMLSelectElement ? entryEditType.value : 'income'),
       scheduledDate: normalizeDate(String(entryEditScheduledDate instanceof HTMLInputElement ? entryEditScheduledDate.value : '')),
       note: String(entryEditNote instanceof HTMLInputElement ? entryEditNote.value : '').trim(),
@@ -5770,6 +5974,49 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   listScrollSyncEl?.addEventListener('scroll', syncTableScrollPositionFromTop, { passive: true });
   listSectionBody?.addEventListener('scroll', syncListScrollPositionFromTable, { passive: true });
   window.addEventListener('resize', syncListScrollWidth);
+  window.addEventListener('resize', () => {
+    if (isEditMode) applyWorkspaceSplit(loadWorkspaceSplitPercent());
+  });
+  form.elements.amount?.addEventListener('input', (ev) => {
+    syncAmountInputDisplay(ev.target);
+  });
+  entryEditAmount?.addEventListener('input', (ev) => {
+    syncAmountInputDisplay(ev.target);
+  });
+
+  workspaceResizerEl?.addEventListener('pointerdown', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    if (!isEditMode || window.innerWidth <= 1000) return;
+    ev.preventDefault();
+    beginWorkspaceResize(ev.pointerId);
+    updateWorkspaceSplitFromPointer(ev.clientX);
+  });
+  workspaceResizerEl?.addEventListener('pointermove', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    if (!isEditMode || window.innerWidth <= 1000) return;
+    if ((ev.buttons & 1) !== 1 && ev.pointerType !== 'touch') return;
+    if (!(workspaceEl instanceof HTMLElement) || !workspaceEl.classList.contains('is-resizing')) return;
+    ev.preventDefault();
+    updateWorkspaceSplitFromPointer(ev.clientX);
+  });
+  workspaceResizerEl?.addEventListener('pointerup', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    finishWorkspaceResize(ev.pointerId);
+  });
+  workspaceResizerEl?.addEventListener('pointercancel', (ev) => {
+    if (!(ev instanceof PointerEvent)) return;
+    finishWorkspaceResize(ev.pointerId);
+  });
+  workspaceResizerEl?.addEventListener('keydown', (ev) => {
+    if (!(ev instanceof KeyboardEvent)) return;
+    if (!isEditMode || window.innerWidth <= 1000) return;
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    ev.preventDefault();
+    const current = loadWorkspaceSplitPercent();
+    const delta = ev.key === 'ArrowLeft' ? -2 : 2;
+    const applied = applyWorkspaceSplit(current + delta);
+    saveWorkspaceSplitPercent(applied);
+  });
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -5779,7 +6026,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const payload = {
       title: String(fd.get('title') || '').trim(),
       content: String(fd.get('content') || '').trim(),
-      amount: Number(fd.get('amount') || 0),
+      amount: parseAmountInputValue(fd.get('amount') || 0),
       type: String(fd.get('type') || 'income'),
       scheduledDate: normalizeDate(String(fd.get('scheduledDate') || '')),
       note: String(fd.get('note') || '').trim(),
@@ -5812,6 +6059,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       invalidateStatementFrame();
       showBanner(statusBanner, 'ok', '予定を追加しました。');
       form.reset();
+      if (form.elements.amount instanceof HTMLInputElement) form.elements.amount.value = '';
       syncFormDateWithMonth();
       syncEntryCfCategoryOptions();
       await loadAll();
@@ -6659,9 +6907,12 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       btn.textContent = section.classList.contains('collapsed') ? labels.collapsed : labels.expanded;
     };
     syncLabel();
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const isCollapsed = section.classList.toggle('collapsed');
       btn.textContent = isCollapsed ? labels.collapsed : labels.expanded;
+      if (!isCollapsed && section === annualSectionBody) {
+        await loadAnnualEntries(false);
+      }
     });
   }
 

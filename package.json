@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --env=\"\"",
+    "deploy:test": "wrangler deploy --env test",
     "d1:migrate": "wrangler d1 migrations apply cashflow_db",
     "d1:migrate:local": "wrangler d1 migrations apply cashflow_db --local",
     "d1:count:entries:local": "wrangler d1 execute cashflow_db --local --command \"SELECT COUNT(*) AS entries_count FROM cashflow_entries;\"",
