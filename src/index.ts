@@ -3533,6 +3533,21 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .column-toggle { padding: 6px 9px; font-size: 12px; border: 1px solid #c7d4e3; background: #fff; }
     .column-toggle.is-hidden { background: #eef3f8; color: var(--muted); border-color: #d6e0ea; }
     .is-hidden-col { display: none !important; }
+    #list-section-body.hide-col-toggle [data-list-col="toggle"] { display: none !important; }
+    #list-section-body.hide-col-index [data-list-col="index"] { display: none !important; }
+    #list-section-body.hide-col-label [data-list-col="label"] { display: none !important; }
+    #list-section-body.hide-col-scheduled_date [data-list-col="scheduled_date"] { display: none !important; }
+    #list-section-body.hide-col-type [data-list-col="type"] { display: none !important; }
+    #list-section-body.hide-col-cf_category [data-list-col="cf_category"] { display: none !important; }
+    #list-section-body.hide-col-title [data-list-col="title"] { display: none !important; }
+    #list-section-body.hide-col-content [data-list-col="content"] { display: none !important; }
+    #list-section-body.hide-col-amount [data-list-col="amount"] { display: none !important; }
+    #list-section-body.hide-col-note [data-list-col="note"] { display: none !important; }
+    #list-section-body.hide-col-actual_date [data-list-col="actual_date"] { display: none !important; }
+    #list-section-body.hide-col-customer_name [data-list-col="customer_name"] { display: none !important; }
+    #list-section-body.hide-col-staff_name [data-list-col="staff_name"] { display: none !important; }
+    #list-section-body.hide-col-running [data-list-col="running"] { display: none !important; }
+    #list-section-body.hide-col-actions [data-list-col="actions"] { display: none !important; }
     .action-row { display: flex; gap: 4px; flex-wrap: nowrap; }
     .actions button, .actions select { padding: 5px 6px; font-size: 11px; min-width: 0; white-space: nowrap; }
     .label-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 6px; border: 1px solid rgba(0,0,0,.15); vertical-align: middle; }
@@ -4185,6 +4200,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         <tbody id="rows"></tbody>
       </table>
     </div>
+    <div id="list-more-container" class="more-container" style="display: none; text-align: center; padding: 12px 14px 20px;">
+      <button type="button" id="list-more-btn" style="padding: 10px 24px; font-size: 14px; font-weight: bold; color: #fff; background: var(--primary-bg, #3b82f6); border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.08); transition: transform 0.1s ease;">もっと見る（残り <span id="list-more-count">0</span> 件）</button>
+    </div>
     </section>
   </div>
   <div
@@ -4383,10 +4401,18 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 <div id="entry-edit-modal" class="modal-overlay">
   <div class="modal-box" style="max-width: 980px; width: 96%;">
     <span id="entry-edit-close" class="modal-close">&times;</span>
-    <h3 style="margin-top:0;">予定一覧の修正</h3>
-    <p style="font-size:13px; color:var(--muted); margin-bottom:10px;">
-      ここで1行分の内容をまとめて修正できます。保存すると予定一覧と集計が更新されます。
-    </p>
+    <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; flex-wrap:wrap; gap:12px;">
+      <div>
+        <h3 style="margin-top:0; margin-bottom:4px;">予定一覧の修正</h3>
+        <p style="font-size:13px; color:var(--muted); margin:0;">
+          ここで1行分の内容をまとめて修正できます。保存すると予定一覧と集計が更新されます。
+        </p>
+      </div>
+      <div class="entry-edit-actions" style="margin-top:0; margin-right:24px; display:flex; gap:8px;">
+        <button id="entry-edit-cancel" type="button" class="secondary">キャンセル</button>
+        <button id="entry-edit-save" type="submit" form="entry-edit-form" class="primary">保存</button>
+      </div>
+    </div>
     <form id="entry-edit-form" novalidate>
       <input type="hidden" id="entry-edit-id" name="id" />
       <div id="entry-edit-grid" class="entry-edit-grid">
@@ -4482,10 +4508,6 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
           </select>
           <div class="field-hint">必要に応じて切り替え</div>
         </div>
-      </div>
-      <div class="entry-edit-actions">
-        <button id="entry-edit-cancel" type="button" class="secondary">キャンセル</button>
-        <button id="entry-edit-save" type="submit" class="primary">保存</button>
       </div>
     </form>
   </div>
@@ -4625,6 +4647,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const listScrollSyncSpacerEl = document.getElementById('list-scroll-sync-spacer');
   const annualSectionBody = document.getElementById('annual-section-body');
   const listSectionBody = document.getElementById('list-section-body');
+  const listMoreContainer = document.getElementById('list-more-container');
+  const listMoreBtn = document.getElementById('list-more-btn');
+  const listMoreCount = document.getElementById('list-more-count');
   const listFilterKeywordEl = document.getElementById('list-filter-keyword');
   const listFilterMonthEl = document.getElementById('list-filter-month');
   const listFilterDayEl = document.getElementById('list-filter-day');
@@ -4691,6 +4716,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   let savingReorder = false;
   let openingBalance = 0;
   let annualTodayBalance = 0;
+  let renderRowsTimer = 0;
+  let renderAnnualTimer = 0;
+  let visibleLimit = 100;
   const selectedEntryIds = new Set();
   const expandedMgmtIds = new Set();
   let lastCheckedVisibleIndex = -1;
@@ -5548,12 +5576,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   function applyListColumnVisibility() {
     const table = document.getElementById('list-section-body');
     if (!table) return;
-    table.querySelectorAll('[data-list-col]').forEach((el) => {
-      if (!(el instanceof HTMLElement)) return;
-      const key = String(el.dataset.listCol || '');
-      if (!key || !LIST_COLUMN_LABELS.has(key)) return;
-      el.classList.toggle('is-hidden-col', hiddenListColumns.has(key));
-    });
+    for (const key of LIST_COLUMN_LABELS.keys()) {
+      table.classList.toggle('hide-col-' + key, hiddenListColumns.has(key));
+    }
     syncListColumnToggleUi();
     syncListScrollWidth();
   }
@@ -5675,6 +5700,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   async function loadAll() {
+    console.time('loadAll TOTAL');
+    visibleLimit = 100;
     const month = selectedMonth();
     const year = String(yearInput.value);
     if (loadAllAbortController) {
@@ -5685,19 +5712,29 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const { signal } = loadAllAbortController;
 
     try {
+      console.time('loadAll: API Fetch (Promise.all)');
       const [summaryRes, entriesRes, openingRes, todayBalanceRes] = await Promise.all([
         fetch('/api/summary?month=' + encodeURIComponent(month), { signal }),
         fetch('/api/entries?year=' + encodeURIComponent(year), { signal }),
         fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'), { signal }),
         fetch('/api/today-balance', { signal })
       ]);
-      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) return false;
+      console.timeEnd('loadAll: API Fetch (Promise.all)');
+      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
+        console.timeEnd('loadAll TOTAL');
+        return false;
+      }
 
+      console.time('loadAll: JSON Parsing');
       const summary = summaryRes.ok ? await summaryRes.json() : { income: 0, expense: 0, balance: 0 };
       const entriesPayload = entriesRes.ok ? await entriesRes.json() : { entries: [] };
       const openingPayload = openingRes.ok ? await openingRes.json() : { openingBalance: 0 };
       const todayBalancePayload = todayBalanceRes.ok ? await todayBalanceRes.json() : { todayBalance: 0 };
-      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) return false;
+      console.timeEnd('loadAll: JSON Parsing');
+      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
+        console.timeEnd('loadAll TOTAL');
+        return false;
+      }
       latestAppliedLoadAllSeq = requestSeq;
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
@@ -5713,13 +5750,30 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         debugEntriesEl.textContent = entriesRes.ok ? 'count=' + String(entries.length) : 'error=' + String(entriesRes.status);
       }
 
+      console.time('loadAll: updateSummary');
       updateSummary(summary);
+      console.timeEnd('loadAll: updateSummary');
+
+      console.time('loadAll: renderRows');
       renderRows();
+      console.timeEnd('loadAll: renderRows');
+
+      console.time('loadAll: syncListScrollPosition');
       syncListScrollPositionFromTable();
+      console.timeEnd('loadAll: syncListScrollPosition');
+
+      console.time('loadAll: updateSelectedMonthAlert');
       updateSelectedMonthAlert();
+      console.timeEnd('loadAll: updateSelectedMonthAlert');
+
+      console.time('loadAll: updateAnnualTodayBalance');
       updateAnnualTodayBalanceFromEntries();
+      console.timeEnd('loadAll: updateAnnualTodayBalance');
+
       if (annualSectionBody instanceof HTMLElement && !annualSectionBody.classList.contains('collapsed')) {
+        console.time('loadAll: loadAnnualEntries');
         await loadAnnualEntries(true);
+        console.timeEnd('loadAll: loadAnnualEntries');
       } else {
         annualEntriesLoadedKey = '';
         prefetchAnnualEntries();
@@ -5730,8 +5784,10 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       } else {
         hideBanner(statusBanner);
       }
+      console.timeEnd('loadAll TOTAL');
       return entriesRes.ok;
     } catch (err) {
+      console.timeEnd('loadAll TOTAL');
       if (err instanceof DOMException && err.name === 'AbortError') {
         return false;
       }
@@ -5746,13 +5802,19 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   function renderAnnualExpenses(rows) {
+    if (renderAnnualTimer) {
+      window.clearTimeout(renderAnnualTimer);
+      renderAnnualTimer = 0;
+    }
     updateAnnualTodayBalanceFromEntries();
     if (rows.length === 0) {
       annualExpenseRowsEl.innerHTML = '<tr><td colspan="8" class="muted">この年のデータはありません。</td></tr>';
       return;
     }
     let annualRunning = openingBalance + annualDisplayCarryBalance;
-    annualExpenseRowsEl.innerHTML = rows.map((e) => {
+    const chunkSize = 150;
+    const initialRows = rows.slice(0, chunkSize);
+    annualExpenseRowsEl.innerHTML = initialRows.map((e) => {
       const amount = Number(e.amount || 0);
       annualRunning += e.type === 'income' ? amount : -amount;
       return '<tr>' +
@@ -5764,8 +5826,36 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       '<td class="amount ' + e.type + '" data-annual-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
       '<td data-annual-col="note">' + escapeHtml(e.note || '') + '</td>' +
       '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '" data-annual-col="running">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
-      '</tr>'
+      '</tr>';
     }).join('');
+
+    if (rows.length > chunkSize) {
+      let offset = chunkSize;
+      function renderNextChunk() {
+        const nextRows = rows.slice(offset, offset + chunkSize);
+        if (nextRows.length === 0) return;
+        const html = nextRows.map((e) => {
+          const amount = Number(e.amount || 0);
+          annualRunning += e.type === 'income' ? amount : -amount;
+          return '<tr>' +
+          '<td>' + escapeHtml(e.scheduled_date) + '</td>' +
+          '<td data-annual-col="type">' + (e.type === 'income' ? '入金' : '出金') + '</td>' +
+          '<td data-annual-col="title">' + escapeHtml(e.title || '') + '</td>' +
+          '<td data-annual-col="content">' + escapeHtml(e.content || '') + '</td>' +
+          '<td data-annual-col="customer_name">' + escapeHtml(e.customer_name || '') + '</td>' +
+          '<td class="amount ' + e.type + '" data-annual-col="amount">' + (e.type === 'income' ? '+' : '-') + fmt.format(amount) + '</td>' +
+          '<td data-annual-col="note">' + escapeHtml(e.note || '') + '</td>' +
+          '<td class="running ' + (annualRunning < 0 ? 'minus' : 'plus') + '" data-annual-col="running">' + (annualRunning > 0 ? '+' : '') + fmt.format(annualRunning) + '</td>' +
+          '</tr>';
+        }).join('');
+        annualExpenseRowsEl.insertAdjacentHTML('beforeend', html);
+        offset += chunkSize;
+        if (offset < rows.length) {
+          renderAnnualTimer = window.setTimeout(renderNextChunk, 0);
+        }
+      }
+      renderAnnualTimer = window.setTimeout(renderNextChunk, 0);
+    }
   }
 
   function normalizeDate(value) {
@@ -6036,11 +6126,17 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   function renderRows() {
+    if (renderRowsTimer) {
+      window.clearTimeout(renderRowsTimer);
+      renderRowsTimer = 0;
+    }
+
     if (entries.length === 0) {
       rowsEl.innerHTML = '<tr><td colspan="16" class="muted">データがありません。上のフォームから予定を追加してください。</td></tr>';
       listFilterCaptionEl.textContent = '';
       updateBulkSelectionCaption();
       syncListScrollWidth();
+      if (listMoreContainer) listMoreContainer.style.display = 'none';
       return;
     }
 
@@ -6054,19 +6150,31 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       rowsEl.innerHTML = '<tr><td colspan="16" class="muted">絞り込み条件に一致する予定はありません。</td></tr>';
       updateBulkSelectionCaption();
       syncListScrollWidth();
+      if (listMoreContainer) listMoreContainer.style.display = 'none';
       return;
     }
 
     const runningById = buildRunningBalanceMap();
 
-    rowsEl.innerHTML = filtered.map((e, idx) => {
+    const toRender = filtered.slice(0, visibleLimit);
+    rowsEl.innerHTML = toRender.map((e, idx) => {
       const entryRunning = Number(runningById.get(e.id) || 0);
       const rendered = renderEntryRowHtml(e, idx, entryRunning);
       return rendered.rowHtml + rendered.detailHtml;
     }).join('');
+
     applyListColumnVisibility();
     updateBulkSelectionCaption();
     syncListScrollWidth();
+
+    if (listMoreContainer && listMoreCount) {
+      if (filtered.length > visibleLimit) {
+        listMoreContainer.style.display = 'block';
+        listMoreCount.textContent = String(filtered.length - visibleLimit);
+      } else {
+        listMoreContainer.style.display = 'none';
+      }
+    }
   }
 
   async function bulkUpdate(action, payload, successMessage) {
@@ -7646,6 +7754,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 
   bindToggle(toggleAnnualBtn, annualSectionBody, { collapsed: '展開する', expanded: '折りたたむ' });
   bindToggle(toggleListBtn, listSectionBody);
+
+  listMoreBtn?.addEventListener('click', () => {
+    visibleLimit += 300;
+    renderRows();
+  });
 
   function escapeHtml(text) {
     return String(text)
