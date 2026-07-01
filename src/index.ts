@@ -113,7 +113,7 @@ const MAX_TITLE_LENGTH = 120;
 const MAX_CONTENT_LENGTH = 140;
 const MAX_NOTE_LENGTH = 500;
 const MIN_AMOUNT = 1;
-const MAX_AMOUNT = 1_000_000_000;
+const MAX_AMOUNT = 10_000_000_000;
 const PASSWORD_RESET_TTL_MINUTES = 30;
 const PASSWORD_ALGO_PBKDF2 = 'pbkdf2_sha256_310000';
 const PASSWORD_ALGO_LEGACY = 'sha256_iter120k';
@@ -1105,12 +1105,31 @@ app.get('/api/opening-balance', async (c) => {
   const row = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as opening_balance
      FROM cashflow_entries
-     WHERE organization_id = ? AND deleted_at IS NULL AND scheduled_date < ?`
+     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date < ?`
   )
     .bind(organizationId, `${month}-01`)
     .first<{ opening_balance: number }>();
 
   return c.json({ month, openingBalance: Number(row?.opening_balance ?? 0) });
+});
+
+app.get('/api/today-balance', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { organizationId } = auth;
+
+  const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const todayStr = jstNow.toISOString().slice(0, 10);
+
+  const row = await c.env.DB.prepare(
+    `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as balance
+     FROM cashflow_entries
+     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date <= ?`
+  )
+    .bind(organizationId, todayStr)
+    .first<{ balance: number }>();
+
+  return c.json({ todayBalance: Number(row?.balance ?? 0) });
 });
 
 app.get('/api/audits', async (c) => {
@@ -1182,13 +1201,18 @@ app.post('/api/entries', async (c) => {
   const staffName = typeof body.staffName === 'string' ? body.staffName.trim() : '';
   const labelColor = typeof body.labelColor === 'string' ? body.labelColor.trim() : '';
   const cfCategory = typeof body.cfCategory === 'string' ? body.cfCategory.trim() : '';
+  const amountState = parseNormalizedAmount(body.amount);
   const allowedCfCategories = new Set(['', ...getCfCategoriesByEntryType(typeof body.type === 'string' ? body.type : 'income')]);
+
+  if (amountState.amount == null) {
+    return c.json({ error: '金額は1円以上の整数で入力してください。', field: 'amount' }, 400);
+  }
 
   const validatedInput = {
     title,
     content,
     note,
-    amount: body.amount,
+    amount: amountState.amount,
     type: body.type,
     scheduledDate: body.scheduledDate,
     accountName,
@@ -4509,8 +4533,16 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const form = document.getElementById('entry-form');
   const statusBanner = document.getElementById('status-banner');
   const submitBtn = document.getElementById('submit-btn');
+  const entryTitleEl = document.getElementById('f-title');
+  const entryContentEl = document.getElementById('f-content');
+  const entryAmountEl = document.getElementById('f-amount');
   const entryTypeEl = document.getElementById('f-type');
+  const entryLabelColorEl = document.getElementById('f-label-color');
+  const entryScheduledDateEl = document.getElementById('f-date');
+  const entryNoteEl = document.getElementById('f-note');
   const entryCfCategoryEl = document.getElementById('f-cf-category');
+  const entryCustomerNameEl = document.getElementById('f-customer-name');
+  const entryStaffNameEl = document.getElementById('f-staff-name');
   const balanceAlertEl = document.getElementById('balance-alert');
   const annualExpenseRowsEl = document.getElementById('annual-expense-rows');
   const annualTodayDateEl = document.getElementById('annual-today-date');
@@ -4658,6 +4690,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   let entries = [];
   let savingReorder = false;
   let openingBalance = 0;
+  let annualTodayBalance = 0;
   const selectedEntryIds = new Set();
   const expandedMgmtIds = new Set();
   let lastCheckedVisibleIndex = -1;
@@ -4828,7 +4861,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   function normalizeAmountInputValue(value) {
-    return String(value || '').replace(/[^\d]/g, '');
+    return String(value || '')
+      .normalize('NFKC')
+      .replace(/[^\\d]/g, '');
   }
 
   function formatAmountInputValue(value) {
@@ -4841,6 +4876,14 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const digits = normalizeAmountInputValue(value);
     if (!digits) return 0;
     return Number(digits);
+  }
+
+  function parseAmountInputState(value) {
+    const digits = normalizeAmountInputValue(value);
+    return {
+      digits,
+      amount: digits ? Number(digits) : 0
+    };
   }
 
   function clampTitleColumnWidth(value) {
@@ -5042,9 +5085,28 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     return nextValue;
   }
 
-  function syncAmountInputDisplay(input) {
+  function syncAmountInputDisplay(input, options = {}) {
     if (!(input instanceof HTMLInputElement)) return;
-    input.value = formatAmountInputValue(input.value);
+    if (!options.force && input.dataset.amountComposing === '1') return;
+    const digits = normalizeAmountInputValue(input.value);
+    if (!digits) {
+      if (String(input.value || '').trim() === '') input.value = '';
+      return;
+    }
+    input.value = digits;
+  }
+
+  function bindAmountInputFormatting(input) {
+    if (!(input instanceof HTMLInputElement)) return;
+    input.addEventListener('compositionstart', () => {
+      input.dataset.amountComposing = '1';
+    });
+    input.addEventListener('compositionend', () => {
+      input.dataset.amountComposing = '0';
+    });
+    input.addEventListener('blur', (ev) => {
+      syncAmountInputDisplay(ev.target, { force: true });
+    });
   }
 
   function clampWorkspaceSplitPercent(value) {
@@ -5504,7 +5566,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       const hint = hints.get('title'); if (hint) hint.classList.add('error');
       return '件名は1〜80文字で入力してください。';
     }
-    if (!Number.isInteger(payload.amount) || payload.amount <= 0) {
+    if (!Number.isInteger(payload.amount) || payload.amount < 1 || payload.amount > 10000000000) {
       const hint = hints.get('amount'); if (hint) hint.classList.add('error');
       return '金額は1円以上の整数で入力してください。';
     }
@@ -5600,27 +5662,15 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   }
 
   function updateAnnualTodayBalanceFromEntries() {
-    const year = String(yearInput.value || '');
-    const yearStart = year ? year + '-01-01' : '';
-    const nextYearStart = year ? String(Number(year) + 1) + '-01-01' : '';
     const todayIso = formatLocalDateIso(new Date());
     const todayLabel = todayIso.replace(/-/g, '/');
     if (annualTodayDateEl instanceof HTMLElement) {
       annualTodayDateEl.textContent = todayLabel;
     }
-    let todayBalance = openingBalance;
-    for (const entry of entries) {
-      const scheduledDate = String(entry.scheduled_date || '');
-      if (!scheduledDate || scheduledDate < yearStart || scheduledDate >= nextYearStart) continue;
-      if (Number(entry.is_completed) !== 1) continue;
-      if (scheduledDate > todayIso) continue;
-      const amount = Number(entry.amount || 0);
-      todayBalance += entry.type === 'income' ? amount : -amount;
-    }
     if (annualTodayBalanceEl instanceof HTMLElement) {
-      annualTodayBalanceEl.textContent = (todayBalance > 0 ? '+' : '') + '¥' + fmt.format(todayBalance);
+      annualTodayBalanceEl.textContent = (annualTodayBalance > 0 ? '+' : '') + '¥' + fmt.format(annualTodayBalance);
       annualTodayBalanceEl.classList.remove('plus', 'minus');
-      annualTodayBalanceEl.classList.add(todayBalance < 0 ? 'minus' : 'plus');
+      annualTodayBalanceEl.classList.add(annualTodayBalance < 0 ? 'minus' : 'plus');
     }
   }
 
@@ -5635,20 +5685,23 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const { signal } = loadAllAbortController;
 
     try {
-      const [summaryRes, entriesRes, openingRes] = await Promise.all([
+      const [summaryRes, entriesRes, openingRes, todayBalanceRes] = await Promise.all([
         fetch('/api/summary?month=' + encodeURIComponent(month), { signal }),
         fetch('/api/entries?year=' + encodeURIComponent(year), { signal }),
-        fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'), { signal })
+        fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'), { signal }),
+        fetch('/api/today-balance', { signal })
       ]);
       if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) return false;
 
       const summary = summaryRes.ok ? await summaryRes.json() : { income: 0, expense: 0, balance: 0 };
       const entriesPayload = entriesRes.ok ? await entriesRes.json() : { entries: [] };
       const openingPayload = openingRes.ok ? await openingRes.json() : { openingBalance: 0 };
+      const todayBalancePayload = todayBalanceRes.ok ? await todayBalanceRes.json() : { todayBalance: 0 };
       if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) return false;
       latestAppliedLoadAllSeq = requestSeq;
       entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
       openingBalance = Number(openingPayload.openingBalance || 0);
+      annualTodayBalance = Number(todayBalancePayload.todayBalance || 0);
       syncMonthFilterOptions();
       syncDayFilterOptions();
       if (debugSummaryEl) {
@@ -5718,7 +5771,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   function normalizeDate(value) {
     const v = String(value || '').trim();
     if (!v) return '';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+    if (/^\\d{4}-\\d{2}-\\d{2}$/.test(v)) return v;
     const d = new Date(v);
     if (Number.isNaN(d.getTime())) return '';
     return formatLocalDateIso(d);
@@ -6464,12 +6517,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   window.addEventListener('resize', () => {
     if (isEditMode) applyWorkspaceSplit(loadWorkspaceSplitPercent());
   });
-  form.elements.amount?.addEventListener('input', (ev) => {
-    syncAmountInputDisplay(ev.target);
-  });
-  entryEditAmount?.addEventListener('input', (ev) => {
-    syncAmountInputDisplay(ev.target);
-  });
+  bindAmountInputFormatting(form.elements.amount);
+  bindAmountInputFormatting(entryEditAmount);
 
   workspaceResizerEl?.addEventListener('pointerdown', (ev) => {
     if (!(ev instanceof PointerEvent)) return;
@@ -6670,21 +6719,34 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     ev.preventDefault();
     hideBanner(statusBanner);
 
-    const fd = new FormData(form);
-    const payload = {
-      title: String(fd.get('title') || '').trim(),
-      content: String(fd.get('content') || '').trim(),
-      amount: parseAmountInputValue(fd.get('amount') || 0),
-      type: String(fd.get('type') || 'income'),
-      scheduledDate: normalizeDate(String(fd.get('scheduledDate') || '')),
-      note: String(fd.get('note') || '').trim(),
-      accountName: '',
-      customerName: String(fd.get('customerName') || '').trim(),
-      staffName: String(fd.get('staffName') || '').trim(),
-      labelColor: String(fd.get('labelColor') || 'blue').trim(),
-      cfCategory: String(fd.get('cfCategory') || '').trim()
-    };
+    const amountEl = document.getElementById('f-amount');
+    const titleEl = document.getElementById('f-title');
+    const contentEl = document.getElementById('f-content');
+    const typeEl = document.getElementById('f-type');
+    const dateEl = document.getElementById('f-date');
+    const noteEl = document.getElementById('f-note');
+    const customerEl = document.getElementById('f-customer-name');
+    const staffEl = document.getElementById('f-staff-name');
+    const colorEl = document.getElementById('f-label-color');
+    const cfCategoryEl = document.getElementById('f-cf-category');
 
+    const rawAmountValue = amountEl && 'value' in amountEl ? String(amountEl.value) : '';
+    const amountDigits = normalizeAmountInputValue(rawAmountValue);
+    const parsedAmount = amountDigits ? parseInt(amountDigits, 10) : 0;
+    const payload = {
+      title: titleEl && 'value' in titleEl ? String(titleEl.value).trim() : '',
+      content: contentEl && 'value' in contentEl ? String(contentEl.value).trim() : '',
+      amount: Number.isFinite(parsedAmount) ? parsedAmount : 0,
+      amountDigits: amountDigits,
+      type: typeEl && 'value' in typeEl ? String(typeEl.value) : 'income',
+      scheduledDate: normalizeDate(dateEl && 'value' in dateEl ? String(dateEl.value) : ''),
+      note: noteEl && 'value' in noteEl ? String(noteEl.value).trim() : '',
+      accountName: '',
+      customerName: customerEl && 'value' in customerEl ? String(customerEl.value).trim() : '',
+      staffName: staffEl && 'value' in staffEl ? String(staffEl.value).trim() : '',
+      labelColor: colorEl && 'value' in colorEl ? String(colorEl.value) : 'blue',
+      cfCategory: cfCategoryEl && 'value' in cfCategoryEl ? String(cfCategoryEl.value) : ''
+    };
     const err = validatePayload(payload);
     if (err) {
       showBanner(statusBanner, 'warn', err);
@@ -6700,7 +6762,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       });
 
       if (!res.ok) {
-        showBanner(statusBanner, 'error', '登録に失敗しました。入力値または権限を確認してください。');
+        const rawBody = await res.text();
+        const parsed = safeJsonParse(rawBody);
+        showBanner(statusBanner, 'error', buildApiErrorMessage(parsed, rawBody, '登録に失敗しました。入力値または権限を確認してください。'));
         return;
       }
 
@@ -9415,6 +9479,27 @@ function parseDateOnly(date?: string | null): string | null {
   if (Number.isNaN(parsed.getTime())) return null;
   if (parsed.toISOString().slice(0, 10) !== d) return null;
   return d;
+}
+
+function parseNormalizedAmount(value: unknown): { digits: string, amount: number | null } {
+  // 数値型が渡された場合は直接数値として検証する
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value < MIN_AMOUNT || value > MAX_AMOUNT) {
+      return { digits: String(value), amount: null };
+    }
+    return { digits: String(value), amount: value };
+  }
+  const digits = String(value ?? '')
+    .normalize('NFKC')
+    .replace(/[^\d]/g, '');
+  if (!/^[1-9]\d*$/.test(digits)) {
+    return { digits, amount: null };
+  }
+  const amount = Number(digits);
+  if (!Number.isInteger(amount) || amount < MIN_AMOUNT || amount > MAX_AMOUNT) {
+    return { digits, amount: null };
+  }
+  return { digits, amount };
 }
 
 function toAuditUtcStart(date?: string | null): string | null {

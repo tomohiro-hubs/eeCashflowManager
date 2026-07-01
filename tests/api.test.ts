@@ -421,7 +421,7 @@ describe('entries api', () => {
     });
 
     expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({ error: 'Invalid payload' });
+    await expect(res.json()).resolves.toEqual({ error: '金額は1円以上の整数で入力してください。', field: 'amount' });
   });
 
   it('returns 400 when reorder ids mismatch existing entries', async () => {
