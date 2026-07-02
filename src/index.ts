@@ -112,7 +112,6 @@ const RESET_TOKEN_TTL_MINUTES = 30;
 const MAX_TITLE_LENGTH = 120;
 const MAX_CONTENT_LENGTH = 140;
 const MAX_NOTE_LENGTH = 500;
-const MIN_AMOUNT = 1;
 const MAX_AMOUNT = 10_000_000_000;
 const PASSWORD_RESET_TTL_MINUTES = 30;
 const PASSWORD_ALGO_PBKDF2 = 'pbkdf2_sha256_310000';
@@ -143,6 +142,7 @@ const CF_CATEGORIES = [
   '売電収入（西予発電所）',
   '売電収入（府中発電所）',
   '売電収入（茨城発電所）',
+  'その他の収入（社長）',
   '現金仕入',
   '買掛金支払',
   '未払金・前渡金支払',
@@ -154,9 +154,13 @@ const CF_CATEGORIES = [
   'その他の支出（UFJ）',
   'その他の支出（木下）',
   'その他の支出（その他）',
+  '保険料',
+  '業務委託費',
   '固定性預金払戻し',
   '銀行借入',
   'E借入',
+  'E借入（事業分）',
+  'E借入（非事業分）',
   '売電事業分資金移動',
   '設備収入（設備売却など）',
   'その他の財務等収入',
@@ -174,9 +178,12 @@ const CF_INCOME_CATEGORIES = [
   '売電収入（西予発電所）',
   '売電収入（府中発電所）',
   '売電収入（茨城発電所）',
+  'その他の収入（社長）',
   '固定性預金払戻し',
   '銀行借入',
   'E借入',
+  'E借入（事業分）',
+  'E借入（非事業分）',
   '売電事業分資金移動',
   '設備収入（設備売却など）',
   'その他の財務等収入'
@@ -193,7 +200,11 @@ const CF_EXPENSE_CATEGORIES = [
   'その他の支出（UFJ）',
   'その他の支出（木下）',
   'その他の支出（その他）',
+  '保険料',
+  '業務委託費',
   '銀行借入返済',
+  'E借入（事業分）',
+  'E借入（非事業分）',
   '設備支出（固定資産投資）',
   'その他の財務等支出',
   '利息保証料支払',
@@ -206,7 +217,8 @@ const CASHFLOW_STATEMENT_OPERATING_INCOME_CATEGORIES = new Set([
   'その他の収入',
   '売電収入（西予発電所）',
   '売電収入（府中発電所）',
-  '売電収入（茨城発電所）'
+  '売電収入（茨城発電所）',
+  'その他の収入（社長）'
 ]);
 const CASHFLOW_STATEMENT_OPERATING_EXPENSE_CATEGORIES = new Set([
   '現金仕入',
@@ -219,18 +231,25 @@ const CASHFLOW_STATEMENT_OPERATING_EXPENSE_CATEGORIES = new Set([
   'その他の支出（社長）',
   'その他の支出（UFJ）',
   'その他の支出（木下）',
-  'その他の支出（その他）'
+  'その他の支出（その他）',
+  '保険料',
+  '業務委託費'
 ]);
 const CASHFLOW_STATEMENT_FINANCING_INCOME_CATEGORIES = new Set([
   '固定性預金払戻し',
   '銀行借入',
   'E借入',
+  'E借入（事業分）',
+  'E借入（非事業分）',
   '売電事業分資金移動',
   '設備収入（設備売却など）',
   'その他の財務等収入'
 ]);
 const CASHFLOW_STATEMENT_FINANCING_EXPENSE_CATEGORIES = new Set([
   '銀行借入返済',
+  'E借入',
+  'E借入（事業分）',
+  'E借入（非事業分）',
   '設備支出（固定資産投資）',
   'その他の財務等支出',
   '利息保証料支払',
@@ -3953,26 +3972,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   </style>
 </head>
 <body>
-<header>
-  <div class="head-wrap">
-    <div class="brand">
-      <div class="brand-title">Cashflow Manager</div>
-      <div class="brand-user" title="${escapeHtml(email)}">${escapeHtml(email)}</div>
-    </div>
-    <div style="display:flex; gap:8px; align-items:center;">
-      <a href="/cashflow-statement" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">資金繰り表</a>
-      <button id="edit-mode-toggle" type="button" class="secondary" style="display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; min-width:110px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; background:rgba(255,255,255,.12); font-size:13px; cursor:pointer; position:relative; z-index:30; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent;">編集モード</button>
-      <a href="/fiscal" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">年間サマリー</a>
-      ${isAdmin ? '<a href="/admin/backups" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">バックアップ</a>' : ''}
-      ${isAdmin ? '<a href="/admin/error-logs" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">エラーログ</a>' : ''}
-      ${isAdmin ? '<a href="/audit" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">監査ログ</a>' : ''}
-      <form method="post" action="/logout" style="display:inline-flex;">
-        <button class="secondary">ログアウト</button>
-      </form>
-      <a href="/password-change" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px;">パスワード変更</a>
-    </div>
-  </div>
-</header>
+${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
 <div class="header-warning-slot">
   <div id="balance-alert" class="balance-alert">警告: 今月の差引がマイナスです。資金繰りを確認してください。</div>
 </div>
@@ -4156,8 +4156,13 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         <option value="gray">ラベル: 灰</option>
         <option value="lightblue">ラベル: 水</option>
       </select>
+      <select id="list-filter-cf-status" aria-label="CF区分設定有無の絞り込み">
+        <option value="all">CF区分: すべて</option>
+        <option value="set">CF区分: 設定あり</option>
+        <option value="unset">CF区分: 未設定</option>
+      </select>
       <button id="list-filter-reset" type="button" class="reset-filter-button">絞り込み解除</button>
-      <button id="export-csv" class="secondary" type="button">CSV出力</button>
+      <button id="export-csv" class="secondary" type="button">Excel出力</button>
       <button id="download-master-csv" class="secondary" type="button">マスターダウンロード</button>
       <input id="cashflow-csv-file" type="file" accept=".csv,text/csv" style="display:none" />
       <button id="import-cashflow-csv" class="secondary" type="button">CSV入力</button>
@@ -4225,8 +4230,8 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
         </div>
       </div>
       <div class="workspace-right-frame-stack">
-        <iframe id="statement-frame" class="workspace-right-frame" title="資金繰り表編集ビュー" loading="lazy" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
-        <iframe id="statement-frame-buffer" class="workspace-right-frame is-hidden" title="資金繰り表編集ビュー（読み込み用）" loading="lazy" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
+        <iframe id="statement-frame" class="workspace-right-frame" title="資金繰り表編集ビュー" loading="eager" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
+        <iframe id="statement-frame-buffer" class="workspace-right-frame is-hidden" title="資金繰り表編集ビュー（読み込み用）" loading="eager" src="about:blank" data-src="/cashflow-statement?embedded=1"></iframe>
       </div>
     </div>
   </aside>
@@ -4656,6 +4661,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   const listFilterTypeEl = document.getElementById('list-filter-type');
   const listFilterCompletedEl = document.getElementById('list-filter-completed');
   const listFilterLabelEl = document.getElementById('list-filter-label');
+  const listFilterCfStatusEl = document.getElementById('list-filter-cf-status');
     const listFilterResetBtn = document.getElementById('list-filter-reset');
     const exportCsvBtn = document.getElementById('export-csv');
     const listFilterCaptionEl = document.getElementById('list-filter-caption');
@@ -5982,6 +5988,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     const typeFilter = String(listFilterTypeEl?.value || 'all');
     const completedFilter = String(listFilterCompletedEl?.value || 'all');
     const labelFilter = String(listFilterLabelEl?.value || 'all');
+    const cfStatusFilter = String(listFilterCfStatusEl?.value || 'all');
     return entries.filter((e) => {
       const d = String(e.scheduled_date || '');
       if (monthFilter !== 'all') {
@@ -5994,6 +6001,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       const isDone = Number(e.is_completed) === 1;
       if (completedFilter === 'open' && isDone) return false;
       if (completedFilter === 'done' && !isDone) return false;
+      const hasCfCategory = String(e.cf_category || '').trim() !== '';
+      if (cfStatusFilter === 'set' && !hasCfCategory) return false;
+      if (cfStatusFilter === 'unset' && hasCfCategory) return false;
       if (!keyword) return true;
       const haystack = [
         e.title || '',
@@ -7577,6 +7587,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   listFilterLabelEl?.addEventListener('change', () => {
     renderRows();
   });
+  listFilterCfStatusEl?.addEventListener('change', () => {
+    renderRows();
+  });
   listFilterResetBtn?.addEventListener('click', () => {
     listFilterKeywordEl.value = '';
     listFilterMonthEl.value = 'all';
@@ -7584,6 +7597,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     listFilterTypeEl.value = 'all';
     listFilterCompletedEl.value = 'all';
     listFilterLabelEl.value = 'all';
+    if (listFilterCfStatusEl) listFilterCfStatusEl.value = 'all';
     syncDayFilterOptions();
     renderRows();
     updateSelectedMonthAlert();
@@ -7603,6 +7617,233 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
   });
   syncListColumnToggleUi();
   applyListColumnVisibility();
+
+  function escapeEntriesExcelXml(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&apos;');
+  }
+
+  function entriesExcelColumnLabel(index) {
+    let n = index;
+    let label = '';
+    while (n > 0) {
+      const remainder = (n - 1) % 26;
+      label = String.fromCharCode(65 + remainder) + label;
+      n = Math.floor((n - 1) / 26);
+    }
+    return label;
+  }
+
+  function encodeEntriesUtf8(text) {
+    return new TextEncoder().encode(String(text));
+  }
+
+  const ENTRIES_EXPORT_CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i += 1) {
+      let c = i;
+      for (let j = 0; j < 8; j += 1) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function entriesExportCrc32(bytes) {
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i += 1) {
+      c = ENTRIES_EXPORT_CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  function entriesExportU16(value) {
+    const out = new Uint8Array(2);
+    new DataView(out.buffer).setUint16(0, value, true);
+    return out;
+  }
+
+  function entriesExportU32(value) {
+    const out = new Uint8Array(4);
+    new DataView(out.buffer).setUint32(0, value >>> 0, true);
+    return out;
+  }
+
+  function concatEntriesBytes(parts) {
+    const total = parts.reduce((sum, part) => sum + part.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part, offset);
+      offset += part.length;
+    }
+    return out;
+  }
+
+  function buildEntriesZip(entries) {
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    for (const entry of entries) {
+      const nameBytes = encodeEntriesUtf8(entry.name);
+      const dataBytes = entry.data instanceof Uint8Array ? entry.data : encodeEntriesUtf8(entry.data);
+      const crc = entriesExportCrc32(dataBytes);
+      const localHeader = concatEntriesBytes([entriesExportU32(0x04034b50), entriesExportU16(20), entriesExportU16(0), entriesExportU16(0), entriesExportU16(0), entriesExportU16(0), entriesExportU32(crc), entriesExportU32(dataBytes.length), entriesExportU32(dataBytes.length), entriesExportU16(nameBytes.length), entriesExportU16(0)]);
+      localParts.push(localHeader, nameBytes, dataBytes);
+      const centralHeader = concatEntriesBytes([entriesExportU32(0x02014b50), entriesExportU16(20), entriesExportU16(20), entriesExportU16(0), entriesExportU16(0), entriesExportU16(0), entriesExportU16(0), entriesExportU32(crc), entriesExportU32(dataBytes.length), entriesExportU32(dataBytes.length), entriesExportU16(nameBytes.length), entriesExportU16(0), entriesExportU16(0), entriesExportU16(0), entriesExportU16(0), entriesExportU32(0), entriesExportU32(offset)]);
+      centralParts.push(centralHeader, nameBytes);
+      offset += localHeader.length + nameBytes.length + dataBytes.length;
+    }
+    const centralDirectory = concatEntriesBytes(centralParts);
+    const localData = concatEntriesBytes(localParts);
+    const eocd = concatEntriesBytes([entriesExportU32(0x06054b50), entriesExportU16(0), entriesExportU16(0), entriesExportU16(entries.length), entriesExportU16(entries.length), entriesExportU32(centralDirectory.length), entriesExportU32(localData.length), entriesExportU16(0)]);
+    return concatEntriesBytes([localData, centralDirectory, eocd]);
+  }
+
+  function entriesXmlInlineString(value, styleId = null) {
+    const styleAttr = styleId === null ? '' : ' s="' + String(styleId) + '"';
+    return '<c' + styleAttr + ' t="inlineStr"><is><t xml:space="preserve">' + escapeEntriesExcelXml(value) + '</t></is></c>';
+  }
+
+  function entriesXmlNumberCell(value, style = 1) {
+    return '<c s="' + style + '" t="n"><v>' + String(Number(value || 0)) + '</v></c>';
+  }
+
+  function entriesXmlEmptyCell(styleId = null) {
+    return styleId === null ? '<c/>' : '<c s="' + String(styleId) + '"/>';
+  }
+
+  function buildEntriesWorkbook(headers, rows, onStep) {
+    const XLSX_MAIN_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    const XLSX_REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const PKG_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+    onStep?.('一覧データ整形');
+    const numericColumns = new Set([0, 6]);
+    const labelColorFillMap = {
+      red: 'FFFFCCCC',
+      yellow: 'FFFFFF00',
+      green: 'FFE2EFDA',
+      lightblue: 'FFDDEBF7',
+      brown: 'FFBF8F00',
+      blue: 'FFC6E0B4'
+    };
+    const fillEntries = Object.entries(labelColorFillMap);
+    const rowStyleMap = new Map(fillEntries.map(([key], index) => {
+      const fillId = index + 2;
+      const textStyleId = index * 2 + 2;
+      const numericStyleId = index * 2 + 3;
+      return [key, { textStyleId, numericStyleId, fillId }];
+    }));
+    const sheetRows = [headers, ...rows].map((row, rowIndex) => {
+      const labelColorKey = rowIndex > 0 ? String(row[12] || '') : '';
+      const rowStyle = rowStyleMap.get(labelColorKey);
+      const cells = row.map((value, cellIndex) => {
+        if (value === null || value === undefined || value === '') {
+          return entriesXmlEmptyCell(rowIndex > 0 && rowStyle ? rowStyle.textStyleId : null);
+        }
+        if (rowIndex > 0 && numericColumns.has(cellIndex) && typeof value === 'number' && Number.isFinite(value)) {
+          return entriesXmlNumberCell(value, rowStyle?.numericStyleId ?? 1);
+        }
+        if (rowIndex > 0 && rowStyle) return entriesXmlInlineString(String(value), rowStyle.textStyleId);
+        return entriesXmlInlineString(String(value));
+      }).join('');
+      return '<row r="' + String(rowIndex + 1) + '">' + cells + '</row>';
+    }).join('');
+
+    onStep?.('ワークシートXML生成');
+    const usedRange = 'A1:' + entriesExcelColumnLabel(headers.length) + String(rows.length + 1);
+    const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
+      '<dimension ref="' + usedRange + '"/>' +
+      '<sheetViews><sheetView workbookViewId="0"/></sheetViews>' +
+      '<sheetData>' + sheetRows + '</sheetData>' +
+      '<autoFilter ref="' + usedRange + '"/>' +
+      '</worksheet>';
+    const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
+      '<fileVersion appName="xl"/>' +
+      '<workbookPr calcMode="auto"/>' +
+      '<bookViews><workbookView activeTab="0"/></bookViews>' +
+      '<sheets><sheet name="予定一覧" sheetId="1" r:id="rId1"/></sheets>' +
+      '</workbook>';
+    const workbookRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="' + PKG_REL_NS + '">' +
+      '<Relationship Id="rId1" Type="' + XLSX_REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/>' +
+      '<Relationship Id="rId2" Type="' + XLSX_REL_NS + '/styles" Target="styles.xml"/>' +
+      '</Relationships>';
+    const rootRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="' + PKG_REL_NS + '">' +
+      '<Relationship Id="rId1" Type="' + XLSX_REL_NS + '/officeDocument" Target="xl/workbook.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+      '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>' +
+      '</Relationships>';
+    const contentTypesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+      '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+      '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
+      '</Types>';
+    const nowIso = new Date().toISOString();
+    const coreXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+      '<dc:title>予定一覧</dc:title>' +
+      '<dc:creator>Cashflow Manager</dc:creator>' +
+      '<cp:lastModifiedBy>Cashflow Manager</cp:lastModifiedBy>' +
+      '<dcterms:created xsi:type="dcterms:W3CDTF">' + nowIso + '</dcterms:created>' +
+      '<dcterms:modified xsi:type="dcterms:W3CDTF">' + nowIso + '</dcterms:modified>' +
+      '</cp:coreProperties>';
+    const appXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+      '<Application>Cashflow Manager</Application>' +
+      '<TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>予定一覧</vt:lpstr></vt:vector></TitlesOfParts>' +
+      '</Properties>';
+    onStep?.('スタイルXML生成');
+    const fillsXml = [
+      '<fill><patternFill patternType="none"/></fill>',
+      '<fill><patternFill patternType="gray125"/></fill>',
+      ...fillEntries.map(([, rgb]) => '<fill><patternFill patternType="solid"><fgColor rgb="' + rgb + '"/><bgColor indexed="64"/></patternFill></fill>')
+    ].join('');
+    const cellXfsXml = [
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',
+      '<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+      ...fillEntries.flatMap(([key]) => {
+        const style = rowStyleMap.get(key);
+        if (!style) return [];
+        return [
+          '<xf numFmtId="0" fontId="0" fillId="' + style.fillId + '" borderId="0" xfId="0" applyFill="1"/>',
+          '<xf numFmtId="3" fontId="0" fillId="' + style.fillId + '" borderId="0" xfId="0" applyFill="1" applyNumberFormat="1"/>'
+        ];
+      })
+    ].join('');
+    const stylesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="' + XLSX_MAIN_NS + '">' +
+      '<fonts count="1"><font><sz val="11"/><name val="Yu Gothic"/></font></fonts>' +
+      '<fills count="' + String(2 + fillEntries.length) + '">' + fillsXml + '</fills>' +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="' + String(2 + fillEntries.length * 2) + '">' + cellXfsXml + '</cellXfs>' +
+      '</styleSheet>';
+    onStep?.('ZIP組み立て');
+    return buildEntriesZip([
+      { name: '[Content_Types].xml', data: contentTypesXml },
+      { name: '_rels/.rels', data: rootRelsXml },
+      { name: 'docProps/app.xml', data: appXml },
+      { name: 'docProps/core.xml', data: coreXml },
+      { name: 'xl/workbook.xml', data: workbookXml },
+      { name: 'xl/_rels/workbook.xml.rels', data: workbookRelsXml },
+      { name: 'xl/styles.xml', data: stylesXml },
+      { name: 'xl/worksheets/sheet1.xml', data: sheetXml }
+    ]);
+  }
 
   exportCsvBtn?.addEventListener('click', () => {
     const filtered = getFilteredEntries();
@@ -7627,19 +7868,31 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
       e.label_color || 'blue',
       e.import_management_no || ''
     ]);
-    const csvContent = [
-      headers.map(h => '"' + h.replace(/"/g, '""') + '"').join(','),
-      ...rows.map(row => row.map(val => '"' + String(val).replace(/"/g, '""') + '"').join(','))
-    ].join(String.fromCharCode(13, 10));
-    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
-    const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'cashflow_' + (yearInput.value || 'data') + '.csv';
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    let exportStep = '開始前';
+    try {
+      exportStep = 'Excelワークブック生成';
+      const workbookZip = buildEntriesWorkbook(headers, rows, (step) => {
+        exportStep = step;
+      });
+      exportStep = 'Blob生成';
+      const blob = new Blob([workbookZip], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      exportStep = 'ダウンロードURL生成';
+      const url = URL.createObjectURL(blob);
+      exportStep = 'ダウンロードリンク生成';
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'cashflow_' + (yearInput.value || 'data') + '.xlsx';
+      link.style.visibility = 'hidden';
+      exportStep = 'ダウンロード実行';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error('Entries Excel export failed', error);
+      const detail = error instanceof Error ? (error.message || error.name) : String(error);
+      showBanner(statusBanner, 'error', 'Excel出力に失敗しました。停止箇所: ' + exportStep + ' / 詳細: ' + detail);
+    }
   });
 
   downloadMasterCsvBtn?.addEventListener('click', () => {
@@ -7775,13 +8028,57 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
 </html>`;
 }
 
+function renderCommonHeaderHtml(email: string, isAdmin: boolean, currentPath: string, options?: { showEditModeBtn?: boolean }): string {
+  const items = [
+    { href: '/app', label: 'Cashflow Manager', admin: false },
+    { href: '/cashflow-statement', label: '資金繰り表', admin: false },
+    { href: '/fiscal', label: '年間サマリー', admin: false },
+    { href: '/admin/backups', label: 'バックアップ', admin: true },
+    { href: '/admin/error-logs', label: 'エラーログ', admin: true },
+    { href: '/audit', label: '監査ログ', admin: true }
+  ];
+
+  const linksHtml = items
+    .filter((item) => !item.admin || isAdmin)
+    .map((item) => {
+      const isActive = item.href === currentPath;
+      const activeStyle = isActive
+        ? 'background:rgba(255,255,255,.2); font-weight:bold; border-color:#fff;'
+        : 'background:rgba(255,255,255,.12);';
+      return `<a href="${item.href}" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px; ${activeStyle}">${item.label}</a>`;
+    });
+
+  const editModeBtn = options?.showEditModeBtn
+    ? `<button id="edit-mode-toggle" type="button" class="secondary" style="display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; min-width:110px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; background:rgba(255,255,255,.12); font-size:13px; cursor:pointer; position:relative; z-index:30; pointer-events:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent;">編集モード</button>`
+    : '';
+
+  return `
+<header style="position: sticky; top: 0; z-index: 20; background: linear-gradient(120deg, #0b3558 0%, #104b77 70%); color: #fff; padding: 14px 20px; box-shadow: 0 6px 20px rgba(10,36,64,0.08); font-family: 'Noto Sans JP', 'Hiragino Sans', sans-serif;">
+  <div style="max-width: 1800px; margin: 0 auto; display: grid; grid-template-columns: 220px 1fr auto; gap: 18px; align-items: center;">
+    <div style="min-width: 0;">
+      <div style="font-size: 20px; font-weight: 700; letter-spacing: .02em;"><a href="/app" style="color:#fff; text-decoration:none;">Cashflow Manager</a></div>
+      <div style="font-size: 12px; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(email)}">${escapeHtml(email)}</div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; justify-content: flex-end;">
+      ${linksHtml.join('\n      ')}
+      ${editModeBtn}
+      <form method="post" action="/logout" style="display:inline-flex; margin:0;">
+        <button class="secondary" style="display:inline-flex; align-items:center; justify-content:center; padding:9px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; background:rgba(255,255,255,.12); font-size:13px; cursor:pointer;">ログアウト</button>
+      </form>
+      <a href="/password-change" style="display:inline-block; padding:9px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.35); color:#fff; text-decoration:none; font-size:13px; background:rgba(255,255,255,.12);">パスワード変更</a>
+    </div>
+  </div>
+</header>
+`;
+}
+
 function renderFiscalPage(email: string, isAdmin: boolean) {
   return `<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Fiscal Studio | Cashflow</title>
+  <title>年間サマリー | Cashflow</title>
   <style>
     :root { --bg:#eef2f6; --ink:#1d2733; --muted:#5e7188; --card:#fff; --line:#d4dde7; --a:#0f4c81; --g:#0d8a4f; --r:#b22a34; --o:#de7a16; --p:#5a4fcf; --y:#c88a00; --accent-deep:#0b3558; --shadow:0 6px 20px rgba(10,36,64,.08);}
     *{box-sizing:border-box}
@@ -7814,23 +8111,19 @@ function renderFiscalPage(email: string, isAdmin: boolean) {
     @media print{body{background:#fff}.card{box-shadow:none}.filters,button{display:none}.wrap{max-width:none;padding:0}.title{font-size:24px}}
   </style>
 </head>
-<body>
-<main class="wrap">
-  <header class="head">
+${renderCommonHeaderHtml(email, isAdmin, '/fiscal')}
+<main class="wrap" style="margin-top: 20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:12px;">
     <div>
-      <div class="title">Fiscal Studio</div>
-      <div class="sub">決算検討ダッシュボード | ${escapeHtml(email)}</div>
+      <div class="title" style="font-size:24px; font-weight:700; margin:0;">年間サマリー</div>
+      <div class="sub" style="color:var(--muted); font-size:13px; margin:0;">決算検討ダッシュボード</div>
     </div>
-    <div class="filters" aria-label="決算期間選択">
-      <a href="/app" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">Cashflow Managerへ戻る</a>
-      ${isAdmin ? '<a href="/admin/backups" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">バックアップ</a>' : ''}
-      ${isAdmin ? '<a href="/admin/error-logs" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">エラーログ</a>' : ''}
-      ${isAdmin ? '<a href="/audit" style="display:inline-flex;align-items:center;padding:9px 10px;border:1px solid #b9c8d9;border-radius:8px;background:#fff;color:#1d2733;text-decoration:none;font-size:14px;">監査ログ</a>' : ''}
+    <div class="filters" aria-label="決算期間選択" style="display:flex; gap:10px; align-items:center;">
       <select id="start-month" aria-label="開始月"></select>
       <select id="end-month" aria-label="終了月"></select>
       <button id="reload">更新</button>
     </div>
-  </header>
+  </div>
   <section class="hero" aria-label="意思決定サマリーカード">
     <article class="card"><div class="k">総入金</div><div id="sum-in" class="v">0</div></article>
     <article class="card"><div class="k">総出金</div><div id="sum-out" class="v">0</div></article>
@@ -7983,10 +8276,12 @@ function renderCashflowStatementPage(
   options?: { embedded?: boolean }
 ) {
   const embedded = options?.embedded === true;
+  const now = new Date();
+  const formattedToday = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`;
   const displayColumns = buildCashflowStatementDisplayColumns(2026, 2031, new Date());
   const printableMonthColumns = displayColumns.map((column, index) => ({ column, index }));
   const uncategorizedCount = cashflowStatementData.uncategorizedCount;
-  const zeroDefaultRowNos = new Set([6, 7, 16, 29, 31, 42, 55, 56]);
+  const zeroDefaultRowNos = new Set([6, 7, 17, 32, 34, 45, 58, 59]);
   const sourceMonthColumnIndexes = CASHFLOW_STATEMENT_COLUMNS
     .map((column, index) => ({ column, index }))
     .filter(({ column }) => isCashflowStatementMonthLabel(column.yearLabel));
@@ -8037,6 +8332,24 @@ function renderCashflowStatementPage(
   const headerStatusCells = displayColumns
     .map((column) => `<th class="month-col status-${cashflowStatementStatusClass(column.status)}" data-col-key="${escapeHtml(column.key)}">${escapeHtml(column.status)}</th>`)
     .join('');
+
+  const printLayoutRules: Array<[string, string]> = [
+    ['header, .sub, .head, .range-toolbar, .range-note, .range-alert, .table-scroll-x', 'display:none !important;'],
+    ['.panel', 'max-width:none; margin:0; border:0; box-shadow:none; border-radius:0;'],
+    ['.panel-body', 'display:none;'],
+    ['table', 'width:auto !important; min-width:0; font-size:9px; margin:0 auto;'],
+    ['th, td', 'padding:2px 5px;'],
+    ['thead th', 'position:static;'],
+    ['.sticky-col, .sticky-sub, .sticky-label, thead .sticky-col', 'position:static; left:auto;'],
+    ['.sticky-label, .sticky-sub', 'width:1% !important; min-width:0 !important; max-width:none !important; white-space:nowrap !important;'],
+    ['.table-wrap', 'overflow:visible; border-top:1px solid var(--line); zoom:var(--print-zoom, 1);'],
+    ['.month-col', 'min-width:0;'],
+    ['tr', 'break-inside:avoid;']
+  ];
+  const printMediaCss = printLayoutRules.map(([selector, declarations]) => `${selector} { ${declarations} }`).join('\n      ');
+  const printEmulationCss = printLayoutRules
+    .map(([selector, declarations]) => selector.split(',').map((part) => `body.print-emu ${part.trim()}`).join(', ') + ` { ${declarations} }`)
+    .join('\n    ');
 
   return `<!doctype html>
 <html lang="ja">
@@ -8112,16 +8425,10 @@ function renderCashflowStatementPage(
     @page { size: A3 landscape; margin: 8mm; }
     @media print {
       body { background:#fff; }
-      .wrap { padding:0; }
-      .head, .range-toolbar, .range-note, .range-alert, .table-scroll-x { display:none !important; }
-      .panel { max-width:none; margin:0; border:0; box-shadow:none; border-radius:0; }
-      .panel-body { display:none; }
-      table { width:100% !important; min-width:0; font-size:9px; }
-      th, td { padding:4px 6px; }
-      .sticky-col, .sticky-sub, .sticky-label, thead .sticky-col { position:static; left:auto; }
-      .table-wrap { overflow:visible; border-top:1px solid var(--line); }
-      .month-col { min-width:0; }
+      .wrap { padding:0 40px; }
+      ${printMediaCss}
     }
+    ${printEmulationCss}
     ${embedded ? `
     .wrap { padding: 0; }
     .head { display: none; }
@@ -8130,20 +8437,20 @@ function renderCashflowStatementPage(
     ` : ''}
   </style>
 </head>
-<body>
-<main class="wrap">
-  <header class="head">
+${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
+<main class="wrap" style="${embedded ? '' : 'margin-top: 20px;'}">
+  ${embedded ? '' : `
+  <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:14px; flex-wrap:wrap; gap:12px;">
     <div>
-      <div class="title">資金繰り表</div>
-      <div class="sub">Excel原本をWebで再現したたたき台 | ${escapeHtml(email)}</div>
+      <div class="title" style="font-size:24px; font-weight:700; margin:0;">資金繰り表</div>
+      <div class="sub" style="color:var(--muted); font-size:13px; margin:0;">Excel原本をWebで再現したたたき台</div>
     </div>
-    <div class="actions">
-      <a href="/app">Cashflow Managerへ戻る</a>
-      <a href="/fiscal">年間サマリー</a>
-      ${isAdmin ? '<a href="/admin/error-logs">エラーログ</a>' : ''}
-      ${isAdmin ? '<a href="/audit">監査ログ</a>' : ''}
+    <div style="text-align:right; font-size:12px; color:#1d2733; line-height:1.5; font-weight:bold;">
+      <div>発行日：${formattedToday}</div>
+      <div>エイコーエナジオ株式会社</div>
     </div>
-  </header>
+  </div>
+  `}
 
   <section class="panel">
     <div class="panel-body">
@@ -8206,6 +8513,9 @@ function renderCashflowStatementPage(
 </main>
 <script>
   const MAX_PDF_MONTH_RANGE = 12;
+  const IS_EMBEDDED = ${embedded ? 'true' : 'false'};
+  const PRINT_AVAIL_WIDTH = 1527;
+  const PRINT_AVAIL_HEIGHT = 1062;
   const printableMonthKeys = ${JSON.stringify(printableMonthColumns.map(({ column }) => toCashflowStatementMonthKey(column.yearLabel)))};
   const monthColumnMap = ${JSON.stringify(printableMonthColumns.map(({ column, index }) => ({ key: toCashflowStatementMonthKey(column.yearLabel), columnKey: column.key, index })))};
   const topScrollEl = document.getElementById('table-scroll-x');
@@ -8277,7 +8587,20 @@ function renderCashflowStatementPage(
       showRangeAlert('選択範囲が長すぎます。A3・1枚で保存するため、PDF保存は12か月以内で選択してください。');
       return;
     }
+    if (IS_EMBEDDED) {
+      const startKey = String(rangeStartEl?.value || '');
+      const endKey = String(rangeEndEl?.value || '');
+      const printUrl = '/cashflow-statement?start=' + encodeURIComponent(startKey) + '&end=' + encodeURIComponent(endKey) + '&autoprint=1';
+      const printWindow = window.open(printUrl, '_blank');
+      if (!printWindow) {
+        showRangeAlert('印刷用ページを開けませんでした。ポップアップを許可してください。');
+        return;
+      }
+      showRangeAlert('印刷用ページを別タブで開きました。');
+      return;
+    }
     if (!applySelectedRange()) return;
+    updatePrintZoom();
     showRangeAlert('印刷ダイアログを開いています。');
     window.setTimeout(() => window.print(), 0);
   }
@@ -8399,6 +8722,128 @@ function renderCashflowStatementPage(
     return '<c s="1"><f>' + escapeExcelXml(formula) + '</f><v>' + String(Number(value || 0)) + '</v></c>';
   }
 
+  function buildEntriesWorkbook(headers, rows, onStep) {
+    onStep?.('一覧データ整形');
+    const numericColumns = new Set([0, 6]);
+    const labelColorFillMap = {
+      red: 'FFFFCCCC',
+      yellow: 'FFFFFF00',
+      green: 'FFE2EFDA',
+      lightblue: 'FFDDEBF7',
+      brown: 'FFBF8F00',
+      blue: 'FFC6E0B4'
+    };
+    const fillEntries = Object.entries(labelColorFillMap);
+    const rowStyleMap = new Map(fillEntries.map(([key], index) => {
+      const fillId = index + 2;
+      const textStyleId = index * 2 + 2;
+      const numericStyleId = index * 2 + 3;
+      return [key, { textStyleId, numericStyleId, fillId }];
+    }));
+    const sheetRows = [headers, ...rows].map((row, rowIndex) => {
+      const labelColorKey = rowIndex > 0 ? String(row[12] || '') : '';
+      const rowStyle = rowStyleMap.get(labelColorKey);
+      const cells = row.map((value, cellIndex) => {
+        if (value === null || value === undefined || value === '') return '<c/>';
+        if (rowIndex > 0 && numericColumns.has(cellIndex) && typeof value === 'number' && Number.isFinite(value)) {
+          return xmlNumberCell(value, rowStyle?.numericStyleId ?? 1);
+        }
+        if (rowIndex > 0 && rowStyle) return '<c s="' + rowStyle.textStyleId + '" t="inlineStr"><is><t xml:space="preserve">' + escapeExcelXml(String(value)) + '</t></is></c>';
+        return xmlInlineString(String(value));
+      }).join('');
+      return '<row r="' + String(rowIndex + 1) + '">' + cells + '</row>';
+    }).join('');
+
+    onStep?.('ワークシートXML生成');
+    const usedRange = 'A1:' + toExcelColumnLabel(headers.length) + String(rows.length + 1);
+    const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
+      '<dimension ref="' + usedRange + '"/>' +
+      '<sheetViews><sheetView workbookViewId="0"/></sheetViews>' +
+      '<sheetData>' + sheetRows + '</sheetData>' +
+      '<autoFilter ref="' + usedRange + '"/>' +
+      '</worksheet>';
+    const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
+      '<fileVersion appName="xl"/>' +
+      '<workbookPr calcMode="auto"/>' +
+      '<bookViews><workbookView activeTab="0"/></bookViews>' +
+      '<sheets><sheet name="予定一覧" sheetId="1" r:id="rId1"/></sheets>' +
+      '</workbook>';
+    const workbookRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="' + PKG_REL_NS + '">' +
+      '<Relationship Id="rId1" Type="' + XLSX_REL_NS + '/worksheet" Target="worksheets/sheet1.xml"/>' +
+      '<Relationship Id="rId2" Type="' + XLSX_REL_NS + '/styles" Target="styles.xml"/>' +
+      '</Relationships>';
+    const rootRelsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="' + PKG_REL_NS + '">' +
+      '<Relationship Id="rId1" Type="' + XLSX_REL_NS + '/officeDocument" Target="xl/workbook.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+      '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>' +
+      '</Relationships>';
+    const contentTypesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+      '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+      '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
+      '</Types>';
+    const nowIso = new Date().toISOString();
+    const coreXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">' +
+      '<dc:title>予定一覧</dc:title>' +
+      '<dc:creator>Cashflow Manager</dc:creator>' +
+      '<cp:lastModifiedBy>Cashflow Manager</cp:lastModifiedBy>' +
+      '<dcterms:created xsi:type="dcterms:W3CDTF">' + nowIso + '</dcterms:created>' +
+      '<dcterms:modified xsi:type="dcterms:W3CDTF">' + nowIso + '</dcterms:modified>' +
+      '</cp:coreProperties>';
+    const appXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+      '<Application>Cashflow Manager</Application>' +
+      '<TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>予定一覧</vt:lpstr></vt:vector></TitlesOfParts>' +
+      '</Properties>';
+    onStep?.('スタイルXML生成');
+    const fillsXml = [
+      '<fill><patternFill patternType="none"/></fill>',
+      '<fill><patternFill patternType="gray125"/></fill>',
+      ...fillEntries.map(([, rgb]) => '<fill><patternFill patternType="solid"><fgColor rgb="' + rgb + '"/><bgColor indexed="64"/></patternFill></fill>')
+    ].join('');
+    const cellXfsXml = [
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>',
+      '<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>',
+      ...fillEntries.flatMap(([key]) => {
+        const style = rowStyleMap.get(key);
+        if (!style) return [];
+        return [
+          '<xf numFmtId="0" fontId="0" fillId="' + style.fillId + '" borderId="0" xfId="0" applyFill="1"/>',
+          '<xf numFmtId="3" fontId="0" fillId="' + style.fillId + '" borderId="0" xfId="0" applyFill="1" applyNumberFormat="1"/>'
+        ];
+      })
+    ].join('');
+    const stylesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="' + XLSX_MAIN_NS + '">' +
+      '<fonts count="1"><font><sz val="11"/><name val="Yu Gothic"/></font></fonts>' +
+      '<fills count="' + String(2 + fillEntries.length) + '">' + fillsXml + '</fills>' +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="' + String(2 + fillEntries.length * 2) + '">' + cellXfsXml + '</cellXfs>' +
+      '</styleSheet>';
+    onStep?.('ZIP組み立て');
+    return buildZip([
+      { name: '[Content_Types].xml', data: contentTypesXml },
+      { name: '_rels/.rels', data: rootRelsXml },
+      { name: 'docProps/app.xml', data: appXml },
+      { name: 'docProps/core.xml', data: coreXml },
+      { name: 'xl/workbook.xml', data: workbookXml },
+      { name: 'xl/_rels/workbook.xml.rels', data: workbookRelsXml },
+      { name: 'xl/styles.xml', data: stylesXml },
+      { name: 'xl/worksheets/sheet1.xml', data: sheetXml }
+    ]);
+  }
+
   function buildWorkbookXml() {
     const exportRows = Array.from(statementTableEl?.querySelectorAll('thead tr, tbody tr') || []);
     const rowNoToWorkbookRow = new Map();
@@ -8424,30 +8869,30 @@ function renderCashflowStatementPage(
           const row6 = rowNoToWorkbookRow.get(6);
           const row7 = rowNoToWorkbookRow.get(7);
           const row8 = rowNoToWorkbookRow.get(8);
-          const row15 = rowNoToWorkbookRow.get(15);
           const row16 = rowNoToWorkbookRow.get(16);
           const row17 = rowNoToWorkbookRow.get(17);
-          const row28 = rowNoToWorkbookRow.get(28);
-          const row29 = rowNoToWorkbookRow.get(29);
+          const row18 = rowNoToWorkbookRow.get(18);
           const row31 = rowNoToWorkbookRow.get(31);
           const row32 = rowNoToWorkbookRow.get(32);
-          const row41 = rowNoToWorkbookRow.get(41);
-          const row42 = rowNoToWorkbookRow.get(42);
-          const row43 = rowNoToWorkbookRow.get(43);
-          const row54 = rowNoToWorkbookRow.get(54);
-          const row55 = rowNoToWorkbookRow.get(55);
-          const row56 = rowNoToWorkbookRow.get(56);
+          const row34 = rowNoToWorkbookRow.get(34);
+          const row35 = rowNoToWorkbookRow.get(35);
+          const row44 = rowNoToWorkbookRow.get(44);
+          const row45 = rowNoToWorkbookRow.get(45);
+          const row46 = rowNoToWorkbookRow.get(46);
+          const row57 = rowNoToWorkbookRow.get(57);
+          const row58 = rowNoToWorkbookRow.get(58);
+          const row59 = rowNoToWorkbookRow.get(59);
           if (rowNo === 6) {
-            if (monthCellIndex === 0 || !row56) return xmlNumberCell(0);
-            return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber - 1) + row56, numericValue);
+            if (monthCellIndex === 0 || !row59) return xmlNumberCell(0);
+            return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber - 1) + row59, numericValue);
           }
-          if (rowNo === 7 && row8 && row15) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row8 + ':' + toExcelColumnLabel(monthColumnNumber) + row15 + ')', numericValue);
-          if (rowNo === 16 && row17 && row28) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row17 + ':' + toExcelColumnLabel(monthColumnNumber) + row28 + ')', numericValue);
-          if (rowNo === 29 && row7 && row16) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row7 + '-' + toExcelColumnLabel(monthColumnNumber) + row16, numericValue);
-          if (rowNo === 31 && row32 && row41) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row32 + ':' + toExcelColumnLabel(monthColumnNumber) + row41 + ')', numericValue);
-          if (rowNo === 42 && row43 && row54) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row43 + ':' + toExcelColumnLabel(monthColumnNumber) + row54 + ')', numericValue);
-          if (rowNo === 55 && row31 && row42) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row31 + '-' + toExcelColumnLabel(monthColumnNumber) + row42, numericValue);
-          if (rowNo === 56 && row6 && row29 && row55) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row6 + '+' + toExcelColumnLabel(monthColumnNumber) + row29 + '+' + toExcelColumnLabel(monthColumnNumber) + row55, numericValue);
+          if (rowNo === 7 && row8 && row16) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row8 + ':' + toExcelColumnLabel(monthColumnNumber) + row16 + ')', numericValue);
+          if (rowNo === 17 && row18 && row31) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row18 + ':' + toExcelColumnLabel(monthColumnNumber) + row31 + ')', numericValue);
+          if (rowNo === 32 && row7 && row17) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row7 + '-' + toExcelColumnLabel(monthColumnNumber) + row17, numericValue);
+          if (rowNo === 34 && row35 && row44) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row35 + ':' + toExcelColumnLabel(monthColumnNumber) + row44 + ')', numericValue);
+          if (rowNo === 45 && row46 && row57) return xmlFormulaCell('SUM(' + toExcelColumnLabel(monthColumnNumber) + row46 + ':' + toExcelColumnLabel(monthColumnNumber) + row57 + ')', numericValue);
+          if (rowNo === 58 && row34 && row45) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row34 + '-' + toExcelColumnLabel(monthColumnNumber) + row45, numericValue);
+          if (rowNo === 59 && row6 && row32 && row58) return xmlFormulaCell(toExcelColumnLabel(monthColumnNumber) + row6 + '+' + toExcelColumnLabel(monthColumnNumber) + row32 + '+' + toExcelColumnLabel(monthColumnNumber) + row58, numericValue);
           if (cellText === '' || cellText === '–') return '<c/>';
           return xmlNumberCell(Number.isFinite(numericValue) ? numericValue : 0);
         }
@@ -8557,6 +9002,20 @@ function renderCashflowStatementPage(
     }
   }
 
+  function updatePrintZoom() {
+    if (!statementTableEl || !document.body) return;
+    document.documentElement.style.setProperty('--print-zoom', '1');
+    const previousBodyWidth = document.body.style.width;
+    document.body.classList.add('print-emu');
+    document.body.style.width = PRINT_AVAIL_WIDTH + 'px';
+    const rect = statementTableEl.getBoundingClientRect();
+    document.body.classList.remove('print-emu');
+    document.body.style.width = previousBodyWidth;
+    if (!rect.width || !rect.height) return;
+    const zoom = Math.min(1, PRINT_AVAIL_WIDTH / rect.width, PRINT_AVAIL_HEIGHT / rect.height);
+    document.documentElement.style.setProperty('--print-zoom', String(Math.floor(zoom * 1000) / 1000));
+  }
+
   function syncStatementScrollMetrics() {
     if (!topScrollEl || !topScrollInnerEl || !tableWrapEl || !statementTableEl) return;
     const fullWidth = statementTableEl.scrollWidth;
@@ -8581,14 +9040,26 @@ function renderCashflowStatementPage(
 
   if (rangeStartEl) rangeStartEl.value = ${JSON.stringify(toCashflowStatementMonthKey(defaultStartMonth))};
   if (rangeEndEl) rangeEndEl.value = ${JSON.stringify(toCashflowStatementMonthKey(defaultEndMonth))};
+  const pageParams = new URLSearchParams(window.location.search);
+  const urlStartKey = String(pageParams.get('start') || '');
+  const urlEndKey = String(pageParams.get('end') || '');
+  const shouldAutoprint = pageParams.get('autoprint') === '1';
+  if (rangeStartEl && printableMonthKeys.includes(urlStartKey)) rangeStartEl.value = urlStartKey;
+  if (rangeEndEl && printableMonthKeys.includes(urlEndKey)) rangeEndEl.value = urlEndKey;
   applySelectedRange();
   syncStatementScrollMetrics();
+  if (shouldAutoprint && !IS_EMBEDDED) {
+    updatePrintZoom();
+    showRangeAlert('印刷ダイアログを開いています。');
+    window.setTimeout(() => window.print(), 250);
+  }
   topScrollEl?.addEventListener('scroll', syncTableScrollFromTop, { passive: true });
   tableWrapEl?.addEventListener('scroll', syncTopScrollFromTable, { passive: true });
   applyRangeBtn?.addEventListener('click', applySelectedRange);
   printPdfBtn?.addEventListener('click', handlePrintPdf);
   exportExcelBtn?.addEventListener('click', handleExportExcel);
   window.addEventListener('resize', syncStatementScrollMetrics);
+  window.addEventListener('beforeprint', updatePrintZoom);
 </script>
 </body>
 </html>`;
@@ -8625,20 +9096,14 @@ function renderAuditPage(email: string) {
     .muted{color:var(--muted)}
   </style>
 </head>
-<body>
-<main class="wrap">
-  <header class="head">
+${renderCommonHeaderHtml(email, true, '/audit')}
+<main class="wrap" style="margin-top: 20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:12px;">
     <div>
-      <div class="title">監査ログ</div>
-      <div class="sub">ログイン履歴と操作履歴を確認 | ${escapeHtml(email)}</div>
+      <div class="title" style="font-size:24px; font-weight:700; margin:0;">監査ログ</div>
+      <div class="sub" style="color:var(--muted); font-size:13px; margin:0;">ログイン履歴と操作履歴を確認</div>
     </div>
-    <div class="actions">
-      <a href="/app">Cashflow Managerへ戻る</a>
-      <a href="/fiscal">Fiscal Studio</a>
-      <a href="/admin/backups">バックアップ</a>
-      <a href="/admin/error-logs">エラーログ</a>
-    </div>
-  </header>
+  </div>
 
   <section class="panel">
     <div class="toolbar">
@@ -8855,21 +9320,14 @@ function renderErrorLogsPage(email: string, logs: AppErrorLogRow[], filters: App
     .summary{font-size:13px;color:var(--muted)}
   </style>
 </head>
-<body>
-<main class="wrap">
-  <header class="head">
+${renderCommonHeaderHtml(email, true, '/admin/error-logs')}
+<main class="wrap" style="margin-top: 20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:12px;">
     <div>
-      <div class="title">エラーログ</div>
-      <div class="sub">Worker の例外・CSV取込み失敗・バックアップ失敗などを確認できます | ${escapeHtml(email)}</div>
+      <div class="title" style="font-size:24px; font-weight:700; margin:0;">エラーログ</div>
+      <div class="sub" style="color:var(--muted); font-size:13px; margin:0;">Worker の例外・CSV取込み失敗・バックアップ失敗などを確認できます</div>
     </div>
-    <div class="actions">
-      <a href="/app">Cashflow Managerへ戻る</a>
-      <a href="/fiscal">Fiscal Studio</a>
-      <a href="/admin/error-logs">エラーログ</a>
-      <a href="/audit">監査ログ</a>
-      <a href="/admin/backups">バックアップ</a>
-    </div>
-  </header>
+  </div>
 
   <section class="panel">
     <form class="toolbar" method="get" action="/admin/error-logs">
@@ -8976,19 +9434,14 @@ function renderBackupsPage(email: string, backups: CashflowEntryBackupListRow[],
     .empty{padding:18px;color:var(--muted);text-align:center}
   </style>
 </head>
-<body>
-<main class="wrap">
-  <header class="head">
+${renderCommonHeaderHtml(email, true, '/admin/backups')}
+<main class="wrap" style="margin-top: 20px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:12px;">
     <div>
-      <div class="title">バックアップ管理</div>
-      <div class="sub">明細だけを毎日23:59(JST)に自動保存し、${CASHFLOW_BACKUP_RETENTION_DAYS}日で自動削除します | ${escapeHtml(email)}</div>
+      <div class="title" style="font-size:24px; font-weight:700; margin:0;">バックアップ管理</div>
+      <div class="sub" style="color:var(--muted); font-size:13px; margin:0;">明細だけを毎日23:59(JST)に自動保存し、${CASHFLOW_BACKUP_RETENTION_DAYS}日で自動削除します</div>
     </div>
-    <div class="actions">
-      <a href="/app">Cashflow Managerへ戻る</a>
-      <a href="/fiscal">Fiscal Studio</a>
-      <a href="/audit">監査ログ</a>
-    </div>
-  </header>
+  </div>
 
   <section class="panel">
     ${statusText ? `<div class="banner ${status === 'empty' ? 'warn' : 'ok'}">${escapeHtml(statusText)}</div>` : ''}
@@ -9418,36 +9871,43 @@ async function loadCashflowStatementData(
     ['その他の収入', 12],
     ['売電収入（西予発電所）', 13],
     ['売電収入（府中発電所）', 14],
-    ['売電収入（茨城発電所）', 15]
+    ['売電収入（茨城発電所）', 15],
+    ['その他の収入（社長）', 16]
   ]);
   const operatingExpenseRowMap = new Map<string, number>([
-    ['現金仕入', 17],
-    ['買掛金支払', 18],
-    ['未払金・前渡金支払', 20],
-    ['人件費支出', 21],
-    ['家賃等', 22],
-    ['固定費', 23],
-    ['租税公課', 24],
-    ['その他の支出（社長）', 25],
-    ['その他の支出（UFJ）', 26],
-    ['その他の支出（木下）', 27],
-    ['その他の支出（その他）', 28]
+    ['現金仕入', 18],
+    ['買掛金支払', 19],
+    ['未払金・前渡金支払', 21],
+    ['人件費支出', 22],
+    ['家賃等', 23],
+    ['固定費', 24],
+    ['租税公課', 25],
+    ['その他の支出（社長）', 26],
+    ['その他の支出（UFJ）', 27],
+    ['その他の支出（木下）', 28],
+    ['その他の支出（その他）', 29],
+    ['保険料', 30],
+    ['業務委託費', 31]
   ]);
   const financingIncomeRowMap = new Map<string, number>([
-    ['固定性預金払戻し', 32],
-    ['銀行借入', 33],
-    ['E借入', 36],
-    ['売電事業分資金移動', 39],
-    ['設備収入（設備売却など）', 40],
-    ['その他の財務等収入', 41]
+    ['固定性預金払戻し', 35],
+    ['銀行借入', 36],
+    ['E借入', 39],
+    ['E借入（事業分）', 40],
+    ['E借入（非事業分）', 41],
+    ['売電事業分資金移動', 42],
+    ['設備収入（設備売却など）', 43],
+    ['その他の財務等収入', 44]
   ]);
   const financingExpenseRowMap = new Map<string, number>([
-    ['銀行借入返済', 43],
-    ['E借入', 46],
-    ['設備支出（固定資産投資）', 49],
-    ['その他の財務等支出', 50],
-    ['利息保証料支払', 51],
-    ['リース債務返済', 52]
+    ['銀行借入返済', 46],
+    ['E借入', 49],
+    ['E借入（事業分）', 50],
+    ['E借入（非事業分）', 51],
+    ['設備支出（固定資産投資）', 52],
+    ['その他の財務等支出', 53],
+    ['利息保証料支払', 54],
+    ['リース債務返済', 55]
   ]);
 
   let runningBalance = 0;
@@ -9470,27 +9930,30 @@ async function loadCashflowStatementData(
     let hasFinancingExpenseEntry = false;
     while (cursor < categorizedEntries.length && categorizedEntries[cursor].monthKey === monthKey) {
       const entry = categorizedEntries[cursor];
-      if (CASHFLOW_STATEMENT_OPERATING_INCOME_CATEGORIES.has(entry.cfCategory)) {
-        operatingIncome += entry.amount;
-        hasOperatingIncomeEntry = true;
-        const rowNo = operatingIncomeRowMap.get(entry.cfCategory);
-        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
-      } else if (CASHFLOW_STATEMENT_OPERATING_EXPENSE_CATEGORIES.has(entry.cfCategory)) {
-        operatingExpense += entry.amount;
-        hasOperatingExpenseEntry = true;
-        const rowNo = operatingExpenseRowMap.get(entry.cfCategory);
-        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
-      }
-      if (CASHFLOW_STATEMENT_FINANCING_INCOME_CATEGORIES.has(entry.cfCategory)) {
-        financingIncome += entry.amount;
-        hasFinancingIncomeEntry = true;
-        const rowNo = financingIncomeRowMap.get(entry.cfCategory);
-        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
-      } else if (CASHFLOW_STATEMENT_FINANCING_EXPENSE_CATEGORIES.has(entry.cfCategory)) {
-        financingExpense += entry.amount;
-        hasFinancingExpenseEntry = true;
-        const rowNo = financingExpenseRowMap.get(entry.cfCategory);
-        if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+      if (entry.type === 'income') {
+        if (CASHFLOW_STATEMENT_OPERATING_INCOME_CATEGORIES.has(entry.cfCategory)) {
+          operatingIncome += entry.amount;
+          hasOperatingIncomeEntry = true;
+          const rowNo = operatingIncomeRowMap.get(entry.cfCategory);
+          if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+        } else if (CASHFLOW_STATEMENT_FINANCING_INCOME_CATEGORIES.has(entry.cfCategory)) {
+          financingIncome += entry.amount;
+          hasFinancingIncomeEntry = true;
+          const rowNo = financingIncomeRowMap.get(entry.cfCategory);
+          if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+        }
+      } else {
+        if (CASHFLOW_STATEMENT_OPERATING_EXPENSE_CATEGORIES.has(entry.cfCategory)) {
+          operatingExpense += entry.amount;
+          hasOperatingExpenseEntry = true;
+          const rowNo = operatingExpenseRowMap.get(entry.cfCategory);
+          if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+        } else if (CASHFLOW_STATEMENT_FINANCING_EXPENSE_CATEGORIES.has(entry.cfCategory)) {
+          financingExpense += entry.amount;
+          hasFinancingExpenseEntry = true;
+          const rowNo = financingExpenseRowMap.get(entry.cfCategory);
+          if (rowNo) addItemRowValue(rowNo, monthKey, entry.amount);
+        }
       }
       runningBalance += entry.type === 'income' ? entry.amount : -entry.amount;
       cursor += 1;
@@ -9523,12 +9986,12 @@ async function loadCashflowStatementData(
 
   valuesByRowNo.set(6, new Map(Array.from(openingByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
   valuesByRowNo.set(7, new Map(Array.from(operatingIncomeByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
-  valuesByRowNo.set(16, new Map(Array.from(operatingExpenseByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
-  valuesByRowNo.set(29, new Map(Array.from(operatingNetByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
-  valuesByRowNo.set(31, new Map(Array.from(financingIncomeByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
-  valuesByRowNo.set(42, new Map(Array.from(financingExpenseByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
-  valuesByRowNo.set(55, new Map(Array.from(financingNetByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
-  valuesByRowNo.set(56, new Map(Array.from(closingByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(17, new Map(Array.from(operatingExpenseByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(32, new Map(Array.from(operatingNetByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(34, new Map(Array.from(financingIncomeByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(45, new Map(Array.from(financingExpenseByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(58, new Map(Array.from(financingNetByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
+  valuesByRowNo.set(59, new Map(Array.from(closingByMonth.entries()).map(([monthKey, value]) => [monthKey, value])));
 
   return { valuesByRowNo, uncategorizedCount };
 }
@@ -9597,7 +10060,7 @@ function parseDateOnly(date?: string | null): string | null {
 function parseNormalizedAmount(value: unknown): { digits: string, amount: number | null } {
   // 数値型が渡された場合は直接数値として検証する
   if (typeof value === 'number') {
-    if (!Number.isInteger(value) || value < MIN_AMOUNT || value > MAX_AMOUNT) {
+    if (!Number.isInteger(value) || value < 1 || value > MAX_AMOUNT) {
       return { digits: String(value), amount: null };
     }
     return { digits: String(value), amount: value };
@@ -9609,7 +10072,7 @@ function parseNormalizedAmount(value: unknown): { digits: string, amount: number
     return { digits, amount: null };
   }
   const amount = Number(digits);
-  if (!Number.isInteger(amount) || amount < MIN_AMOUNT || amount > MAX_AMOUNT) {
+  if (!Number.isInteger(amount) || amount < 1 || amount > MAX_AMOUNT) {
     return { digits, amount: null };
   }
   return { digits, amount };
@@ -10037,7 +10500,7 @@ function isValidEntryInput(input: {
     allowedColors.has(input.labelColor) &&
     categories.has(input.cfCategory) &&
     Number.isInteger(input.amount) &&
-    Number(input.amount) >= MIN_AMOUNT &&
+    Number(input.amount) >= 1 &&
     Number(input.amount) <= MAX_AMOUNT &&
     isValidType(input.type) &&
     isValidDate(typeof input.scheduledDate === 'string' ? input.scheduledDate : undefined)
