@@ -44,6 +44,7 @@ const setupStatements = [
     user_id INTEGER NOT NULL,
     organization_id INTEGER,
     title TEXT NOT NULL,
+    content TEXT,
     amount INTEGER NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
     scheduled_date TEXT NOT NULL,
@@ -54,6 +55,7 @@ const setupStatements = [
     customer_name TEXT,
     staff_name TEXT,
     label_color TEXT NOT NULL DEFAULT '',
+    cf_category TEXT NOT NULL DEFAULT '',
     import_source_file_name TEXT,
     import_management_no TEXT,
     import_batch_id TEXT,
@@ -89,6 +91,19 @@ const setupStatements = [
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS cashflow_entry_backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('manual', 'scheduled')),
+    snapshot_json TEXT NOT NULL,
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    created_by_user_id INTEGER,
+    restored_at TEXT,
+    restored_by_user_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user_month_order
    ON cashflow_entries(user_id, scheduled_date, order_index)`,
   `CREATE INDEX IF NOT EXISTS idx_entries_org_month_order
@@ -97,6 +112,8 @@ const setupStatements = [
    ON organization_members(organization_id, user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_audits_user_entry_changed_desc
    ON cashflow_entry_audits(user_id, entry_id, changed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_cashflow_entry_backups_org_created_desc
+   ON cashflow_entry_backups(organization_id, created_at DESC, id DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user_sample
    ON cashflow_entries(user_id, is_sample, scheduled_date, order_index, id)`,
   `CREATE INDEX IF NOT EXISTS idx_entries_user_completed
@@ -104,7 +121,7 @@ const setupStatements = [
   `CREATE INDEX IF NOT EXISTS idx_prt_token_validity
    ON password_reset_tokens(token_hash, used_at, expires_at)`,
   `CREATE TRIGGER IF NOT EXISTS trg_entries_touch_updated_at
-   AFTER UPDATE OF title, amount, type, scheduled_date, order_index, note, deleted_at ON cashflow_entries
+   AFTER UPDATE OF title, content, amount, type, scheduled_date, order_index, note, deleted_at, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, import_source_file_name, import_management_no, import_batch_id, organization_id, is_sample, is_completed, created_by_user_id ON cashflow_entries
    FOR EACH ROW
    WHEN NEW.updated_at = OLD.updated_at
    BEGIN
@@ -127,11 +144,24 @@ const setupStatements = [
          'user_id', NEW.user_id,
          'organization_id', NEW.organization_id,
          'title', NEW.title,
+         'content', NEW.content,
          'amount', NEW.amount,
          'type', NEW.type,
          'scheduled_date', NEW.scheduled_date,
          'order_index', NEW.order_index,
          'note', NEW.note,
+         'account_name', NEW.account_name,
+         'actual_transaction_date', NEW.actual_transaction_date,
+         'customer_name', NEW.customer_name,
+         'staff_name', NEW.staff_name,
+         'label_color', NEW.label_color,
+         'cf_category', NEW.cf_category,
+         'import_source_file_name', NEW.import_source_file_name,
+         'import_management_no', NEW.import_management_no,
+         'import_batch_id', NEW.import_batch_id,
+         'is_sample', NEW.is_sample,
+         'is_completed', NEW.is_completed,
+         'created_by_user_id', NEW.created_by_user_id,
          'created_at', NEW.created_at,
          'updated_at', NEW.updated_at,
          'deleted_at', NEW.deleted_at
@@ -153,11 +183,24 @@ const setupStatements = [
          'user_id', NEW.user_id,
          'organization_id', NEW.organization_id,
          'title', NEW.title,
+         'content', NEW.content,
          'amount', NEW.amount,
          'type', NEW.type,
          'scheduled_date', NEW.scheduled_date,
          'order_index', NEW.order_index,
          'note', NEW.note,
+         'account_name', NEW.account_name,
+         'actual_transaction_date', NEW.actual_transaction_date,
+         'customer_name', NEW.customer_name,
+         'staff_name', NEW.staff_name,
+         'label_color', NEW.label_color,
+         'cf_category', NEW.cf_category,
+         'import_source_file_name', NEW.import_source_file_name,
+         'import_management_no', NEW.import_management_no,
+         'import_batch_id', NEW.import_batch_id,
+         'is_sample', NEW.is_sample,
+         'is_completed', NEW.is_completed,
+         'created_by_user_id', NEW.created_by_user_id,
          'created_at', NEW.created_at,
          'updated_at', NEW.updated_at,
          'deleted_at', NEW.deleted_at
@@ -228,6 +271,24 @@ const setupStatements = [
     first_failed_at TEXT NOT NULL,
     blocked_until TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS app_error_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT,
+    user_id INTEGER,
+    organization_id INTEGER,
+    source TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'error' CHECK(level IN ('error', 'warn')),
+    method TEXT,
+    path TEXT,
+    status_code INTEGER,
+    message TEXT NOT NULL,
+    error_name TEXT,
+    stack TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL
   )`
 ];
 
@@ -246,7 +307,9 @@ beforeEach(async () => {
   await env.DB.prepare('DELETE FROM rakuraku_cashflow_import_rows').run();
   await env.DB.prepare('DELETE FROM rakuraku_cashflow_import_batches').run();
   await env.DB.prepare('DELETE FROM password_reset_tokens').run();
+  await env.DB.prepare('DELETE FROM cashflow_entry_backups').run();
   await env.DB.prepare('DELETE FROM cashflow_entry_audits').run();
+  await env.DB.prepare('DELETE FROM app_error_logs').run();
   await env.DB.prepare('DELETE FROM cashflow_entries').run();
   await env.DB.prepare('DELETE FROM users').run();
   await env.DB.prepare('DELETE FROM organizations').run();

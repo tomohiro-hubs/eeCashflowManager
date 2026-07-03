@@ -3,6 +3,10 @@
   "name": "cashflow-worker-app",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-30",
+  "compatibility_flags": [ "nodejs_compat" ],
+  "triggers": {
+    "crons": [ "59 14 * * *" ]
+  },
   "d1_databases": [
     {
       "binding": "DB",
