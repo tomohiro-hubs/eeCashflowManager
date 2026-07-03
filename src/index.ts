@@ -4037,9 +4037,9 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   <section class="panel">
     <div class="topline"><strong>入出金予定の追加</strong><span class="muted">金額は整数（円）で入力</span></div>
     <div class="toolbar" style="margin-bottom:10px;">
-      <button id="load-sample" type="button">サンプルデータ投入</button>
-      <button id="clear-sample" type="button">サンプルデータ削除</button>
-      <button id="clear-all-entries" type="button">予定一覧を全削除</button>
+      <button id="load-sample" type="button" hidden>サンプルデータ投入</button>
+      <button id="clear-sample" type="button" hidden>サンプルデータ削除</button>
+      <button id="clear-all-entries" type="button" hidden>予定一覧を全削除</button>
       <input id="rakuraku-csv-file" type="file" accept=".csv,text/csv" />
       <button id="import-rakuraku-csv" type="button">楽楽販売CSV読込</button>
     </div>
@@ -4768,6 +4768,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   const MIN_ANNUAL_NOTE_COL_WIDTH = 120;
   const MAX_ANNUAL_NOTE_COL_WIDTH = 420;
   const EDIT_MODE_SPLIT_STORAGE_KEY = 'cashflow-edit-mode-split-v1';
+  const ENTRIES_EXPORT_SEQUENCE_STORAGE_KEY = 'cashflow-entries-export-sequence-v1';
   const MIN_EDIT_MODE_LEFT_PERCENT = 35;
   const MAX_EDIT_MODE_LEFT_PERCENT = 70;
   const LIST_COLUMN_STORAGE_KEY = 'cashflow-list-hidden-columns-v1';
@@ -5449,7 +5450,13 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const month = selectedMonth();
     if (!month) return;
     if (!dateInput.value || dateInput.value.slice(0, 7) !== month) {
-      dateInput.value = month + '-01';
+      const [yearText, monthText] = month.split('-');
+      const year = Number(yearText);
+      const monthIndex = Number(monthText) - 1;
+      const today = new Date();
+      const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+      const day = String(Math.min(today.getDate(), lastDay)).padStart(2, '0');
+      dateInput.value = month + '-' + day;
     }
   }
 
@@ -5878,6 +5885,22 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     return year + '-' + month + '-' + day;
+  }
+
+  function nextEntriesExportSequence(year, exportDateKey) {
+    const scopeKey = String(year || 'data') + '_' + String(exportDateKey || '').replaceAll('-', '');
+    try {
+      const raw = localStorage.getItem(ENTRIES_EXPORT_SEQUENCE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      const current = Number(parsed && typeof parsed === 'object' ? parsed[scopeKey] : 0);
+      const next = Number.isFinite(current) && current > 0 ? current + 1 : 1;
+      const nextState = parsed && typeof parsed === 'object' ? parsed : {};
+      nextState[scopeKey] = next;
+      localStorage.setItem(ENTRIES_EXPORT_SEQUENCE_STORAGE_KEY, JSON.stringify(nextState));
+      return next;
+    } catch (_) {
+      return 1;
+    }
   }
 
   function syncMonthFilterOptions() {
@@ -7880,8 +7903,11 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       const url = URL.createObjectURL(blob);
       exportStep = 'ダウンロードリンク生成';
       const link = document.createElement('a');
+      const exportDate = formatLocalDateIso(new Date()).replaceAll('-', '');
+      const exportYear = String(yearInput.value || 'data');
+      const exportSequence = String(nextEntriesExportSequence(exportYear, exportDate)).padStart(3, '0');
       link.href = url;
-      link.download = 'cashflow_' + (yearInput.value || 'data') + '.xlsx';
+      link.download = 'cashflow_' + exportYear + '_' + exportDate + '-' + exportSequence + '.xlsx';
       link.style.visibility = 'hidden';
       exportStep = 'ダウンロード実行';
       document.body.appendChild(link);
@@ -8342,7 +8368,7 @@ function renderCashflowStatementPage(
     ['thead th', 'position:static;'],
     ['.sticky-col, .sticky-sub, .sticky-label, thead .sticky-col', 'position:static; left:auto;'],
     ['.sticky-label, .sticky-sub', 'width:1% !important; min-width:0 !important; max-width:none !important; white-space:nowrap !important;'],
-    ['.table-wrap', 'overflow:visible; border-top:1px solid var(--line); zoom:var(--print-zoom, 1);'],
+    ['.table-wrap', 'overflow:visible; border-top:1px solid var(--line); zoom:var(--print-zoom, 1); max-height:none !important;'],
     ['.month-col', 'min-width:0;'],
     ['tr', 'break-inside:avoid;']
   ];
@@ -8384,9 +8410,11 @@ function renderCashflowStatementPage(
     .table-scroll-x { overflow-x:auto; overflow-y:hidden; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:#f8fafc; height:18px; }
     .table-scroll-x.is-hidden { display:none; }
     .table-scroll-x-inner { height:1px; }
-    .table-wrap { overflow:auto; border-top:1px solid var(--line); }
+    .table-wrap { overflow:auto; border-top:1px solid var(--line); max-height:calc(100vh - 130px); }
     table { width:max-content; min-width:100%; border-collapse:separate; border-spacing:0; font-size:12px; }
     thead th { position:sticky; top:0; z-index:3; background:#f5f8fb; color:#334e68; font-weight:700; }
+    thead tr:first-child th { top:0; }
+    thead tr:nth-child(2) th { top:35px; }
     th, td { border-right:1px solid #e7edf4; border-bottom:1px solid #e7edf4; padding:8px 10px; white-space:nowrap; }
     thead tr:first-child th { border-top:0; }
     tr > *:first-child { border-left:0; }
@@ -8608,7 +8636,8 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
   function buildExportFileName(extension) {
     const startKey = String(rangeStartEl?.value || '');
     const endKey = String(rangeEndEl?.value || '');
-    return 'cashflow_statement_' + startKey + '_to_' + endKey + '.' + extension;
+    const exportDate = formatLocalDateIso(new Date()).replaceAll('-', '');
+    return 'cashflow_statement_' + startKey + '_to_' + endKey + '_' + exportDate + '.' + extension;
   }
 
   function escapeExcelHtml(value) {
