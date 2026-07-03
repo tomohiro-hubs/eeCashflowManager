@@ -6102,17 +6102,17 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
               '<button type="button" data-move="down" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>下</button>' +
               '<button type="button" data-move="bottom" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>末尾</button>' +
               '<button type="button" data-delete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>削除</button>' +
+              '<button type="button" data-openedit="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>修正</button>' +
+              '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
+              '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
+              buildLabelColorOptionsHtml(String(e.label_color || 'blue')) +
+              '</select>' +
             '</div>' +
             '<div class="action-row">' +
               '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
               '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
-              '<button type="button" data-openedit="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>修正</button>' +
-              '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
               '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
               buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
-              '</select>' +
-              '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
-              buildLabelColorOptionsHtml(String(e.label_color || 'blue')) +
               '</select>' +
             '</div>' +
           '</td>' +
