@@ -1151,6 +1151,112 @@ app.get('/api/today-balance', async (c) => {
   return c.json({ todayBalance: Number(row?.balance ?? 0) });
 });
 
+// 主画面(/app)の初期表示に必要な4種のデータを1リクエストにまとめて返す。
+// 認証や往復回数を減らすための集約エンドポイント。数字の計算ロジックは
+// 既存の /api/summary, /api/entries, /api/opening-balance, /api/today-balance と同一。
+// 一部のクエリが失敗しても画面全体が落ちないよう、成功した分は返しつつ、
+// 失敗した項目だけ errors に日本語メッセージを載せる。
+app.get('/api/app-bootstrap', async (c) => {
+  const auth = requireOrganizationContext(c);
+  if (auth instanceof Response) return auth;
+  const { organizationId } = auth;
+
+  const year = parseYear(c.req.query('year'));
+  if (!year) return c.json({ error: '年の指定が正しくありません。YYYY（例: 2026）形式で指定してください。' }, 400);
+  const month = parseMonth(c.req.query('month'));
+  if (!month) return c.json({ error: '月の指定が正しくありません。YYYY-MM（例: 2026-07）形式で指定してください。' }, 400);
+  if (!month.startsWith(`${year}-`)) {
+    return c.json({ error: '選択中の年と月が一致していません。' }, 400);
+  }
+
+  try {
+    const { startDate, endDate } = getYearDateRange(year);
+    const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
+    const todayStr = jstNow.toISOString().slice(0, 10);
+
+    // 4クエリを同時に投げる。allSettled なので1つ失敗しても全体は止まらない。
+    const [summaryR, entriesR, openingR, todayR] = await Promise.allSettled([
+      c.env.DB.prepare(
+        `SELECT
+         COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as income,
+          COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as expense
+         FROM cashflow_entries
+         WHERE organization_id = ? AND substr(scheduled_date, 1, 7) = ? AND deleted_at IS NULL`
+      )
+        .bind(organizationId, month)
+        .first<{ income: number; expense: number }>(),
+      c.env.DB.prepare(
+        `SELECT id, title, content, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, is_completed, created_by_user_id, import_management_no
+         FROM cashflow_entries
+         WHERE organization_id = ?
+           AND scheduled_date >= ?
+           AND scheduled_date < ?
+           AND deleted_at IS NULL
+         ORDER BY scheduled_date ASC, order_index ASC, id ASC`
+      )
+        .bind(organizationId, startDate, endDate)
+        .all(),
+      // 期首残高は「選択年の1月1日より前」の完了分累計。
+      // 既存クライアントが常に year-01 を渡していた挙動に合わせる（選択月ではなく年初が基準）。
+      c.env.DB.prepare(
+        `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as opening_balance
+         FROM cashflow_entries
+         WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date < ?`
+      )
+        .bind(organizationId, `${year}-01-01`)
+        .first<{ opening_balance: number }>(),
+      c.env.DB.prepare(
+        `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as balance
+         FROM cashflow_entries
+         WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date <= ?`
+      )
+        .bind(organizationId, todayStr)
+        .first<{ balance: number }>()
+    ]);
+
+    const errors: Record<string, string> = {};
+
+    let summary = { income: 0, expense: 0, balance: 0 };
+    if (summaryR.status === 'fulfilled') {
+      const income = Number(summaryR.value?.income ?? 0);
+      const expense = Number(summaryR.value?.expense ?? 0);
+      summary = { income, expense, balance: income - expense };
+    } else {
+      errors.summary = '月次サマリー（入金・出金・差引）の取得に失敗しました。';
+      console.error('app-bootstrap summary failed', summaryR.reason);
+    }
+
+    let entries: unknown[] = [];
+    if (entriesR.status === 'fulfilled') {
+      entries = entriesR.value.results ?? [];
+    } else {
+      errors.entries = '予定一覧の取得に失敗しました。';
+      console.error('app-bootstrap entries failed', entriesR.reason);
+    }
+
+    let openingBalance = 0;
+    if (openingR.status === 'fulfilled') {
+      openingBalance = Number(openingR.value?.opening_balance ?? 0);
+    } else {
+      errors.openingBalance = '期首残高の計算に失敗しました。';
+      console.error('app-bootstrap opening-balance failed', openingR.reason);
+    }
+
+    let todayBalance = 0;
+    if (todayR.status === 'fulfilled') {
+      todayBalance = Number(todayR.value?.balance ?? 0);
+    } else {
+      errors.todayBalance = '本日時点残高の計算に失敗しました。';
+      console.error('app-bootstrap today-balance failed', todayR.reason);
+    }
+
+    return c.json({ year, month, summary, entries, openingBalance, todayBalance, errors });
+  } catch (err) {
+    console.error('app-bootstrap unexpected error', err);
+    return c.json({ error: '画面データの取得中に予期しないエラーが発生しました。時間をおいて再読み込みしてください。' }, 500);
+  }
+});
+
 app.get('/api/audits', async (c) => {
   const auth = requireOrganizationContext(c);
   if (auth instanceof Response) return auth;
@@ -5725,25 +5831,59 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const { signal } = loadAllAbortController;
 
     try {
-      console.time('loadAll: API Fetch (Promise.all)');
-      const [summaryRes, entriesRes, openingRes, todayBalanceRes] = await Promise.all([
-        fetch('/api/summary?month=' + encodeURIComponent(month), { signal }),
-        fetch('/api/entries?year=' + encodeURIComponent(year), { signal }),
-        fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'), { signal }),
-        fetch('/api/today-balance', { signal })
-      ]);
-      console.timeEnd('loadAll: API Fetch (Promise.all)');
-      if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
-        console.timeEnd('loadAll TOTAL');
-        return false;
+      console.time('loadAll: API Fetch');
+      // 数字の計算ロジックは従来と同じ。取得経路だけを「4本並列」から
+      // 「集約API 1本」に変更している。集約が使えないときは従来の個別APIへ自動フォールバック。
+      let summary = { income: 0, expense: 0, balance: 0 };
+      let entriesPayload = { entries: [] };
+      let openingPayload = { openingBalance: 0 };
+      let todayBalancePayload = { todayBalance: 0 };
+      let summaryOk = false;
+      let entriesOk = false;
+      let bootstrapUsed = false;
+      let sectionErrors = null;
+
+      try {
+        const bootstrapRes = await fetch(
+          '/api/app-bootstrap?year=' + encodeURIComponent(year) + '&month=' + encodeURIComponent(month),
+          { signal }
+        );
+        if (bootstrapRes.ok) {
+          const payload = await bootstrapRes.json();
+          bootstrapUsed = true;
+          summary = payload.summary || summary;
+          entriesPayload = { entries: Array.isArray(payload.entries) ? payload.entries : [] };
+          openingPayload = { openingBalance: Number(payload.openingBalance || 0) };
+          todayBalancePayload = { todayBalance: Number(payload.todayBalance || 0) };
+          sectionErrors = payload.errors && typeof payload.errors === 'object' ? payload.errors : null;
+          summaryOk = !(sectionErrors && sectionErrors.summary);
+          entriesOk = !(sectionErrors && sectionErrors.entries);
+        }
+      } catch (bootstrapErr) {
+        if (bootstrapErr instanceof DOMException && bootstrapErr.name === 'AbortError') throw bootstrapErr;
+        console.warn('app-bootstrap 失敗のため個別APIにフォールバックします', bootstrapErr);
       }
 
-      console.time('loadAll: JSON Parsing');
-      const summary = summaryRes.ok ? await summaryRes.json() : { income: 0, expense: 0, balance: 0 };
-      const entriesPayload = entriesRes.ok ? await entriesRes.json() : { entries: [] };
-      const openingPayload = openingRes.ok ? await openingRes.json() : { openingBalance: 0 };
-      const todayBalancePayload = todayBalanceRes.ok ? await todayBalanceRes.json() : { todayBalance: 0 };
-      console.timeEnd('loadAll: JSON Parsing');
+      // 集約APIが使えなかった場合のみ、従来の個別API（4本並列）で取得する。
+      if (!bootstrapUsed) {
+        const [summaryRes, entriesRes, openingRes, todayBalanceRes] = await Promise.all([
+          fetch('/api/summary?month=' + encodeURIComponent(month), { signal }),
+          fetch('/api/entries?year=' + encodeURIComponent(year), { signal }),
+          fetch('/api/opening-balance?month=' + encodeURIComponent(year + '-01'), { signal }),
+          fetch('/api/today-balance', { signal })
+        ]);
+        if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
+          console.timeEnd('loadAll TOTAL');
+          return false;
+        }
+        summary = summaryRes.ok ? await summaryRes.json() : summary;
+        entriesPayload = entriesRes.ok ? await entriesRes.json() : entriesPayload;
+        openingPayload = openingRes.ok ? await openingRes.json() : openingPayload;
+        todayBalancePayload = todayBalanceRes.ok ? await todayBalanceRes.json() : todayBalancePayload;
+        summaryOk = summaryRes.ok;
+        entriesOk = entriesRes.ok;
+      }
+      console.timeEnd('loadAll: API Fetch');
       if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
         console.timeEnd('loadAll TOTAL');
         return false;
@@ -5755,12 +5895,12 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       syncMonthFilterOptions();
       syncDayFilterOptions();
       if (debugSummaryEl) {
-        debugSummaryEl.textContent = summaryRes.ok
+        debugSummaryEl.textContent = summaryOk
           ? 'income=' + String(Number(summary.income || 0)) + ' expense=' + String(Number(summary.expense || 0)) + ' balance=' + String(Number(summary.balance || 0))
-          : 'error=' + String(summaryRes.status);
+          : 'error';
       }
       if (debugEntriesEl) {
-        debugEntriesEl.textContent = entriesRes.ok ? 'count=' + String(entries.length) : 'error=' + String(entriesRes.status);
+        debugEntriesEl.textContent = entriesOk ? 'count=' + String(entries.length) : 'error';
       }
 
       console.time('loadAll: updateSummary');
@@ -5792,13 +5932,16 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         prefetchAnnualEntries();
       }
       if (isEditMode && statementFrameNeedsRefresh) invalidateStatementFrame();
-      if (!entriesRes.ok) {
-        showBanner(statusBanner, 'error', '一覧データの取得に失敗しました。再読み込みしてください。');
+      if (!entriesOk) {
+        showBanner(statusBanner, 'error', (sectionErrors && sectionErrors.entries) || '一覧データの取得に失敗しました。再読み込みしてください。');
+      } else if (sectionErrors && (sectionErrors.summary || sectionErrors.openingBalance || sectionErrors.todayBalance)) {
+        const partialMsgs = [sectionErrors.summary, sectionErrors.openingBalance, sectionErrors.todayBalance].filter(Boolean);
+        showBanner(statusBanner, 'error', partialMsgs.join(' / '));
       } else {
         hideBanner(statusBanner);
       }
       console.timeEnd('loadAll TOTAL');
-      return entriesRes.ok;
+      return entriesOk;
     } catch (err) {
       console.timeEnd('loadAll TOTAL');
       if (err instanceof DOMException && err.name === 'AbortError') {
