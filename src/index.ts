@@ -858,7 +858,7 @@ app.get('/api/annual-expense-entries', async (c) => {
   const { startDate, endDate } = getYearDateRange(year);
   const month = c.req.query('month');
   const parsedMonth = month === 'all' || month === '' || month == null ? 'all' : parseMonth(month);
-  if (month && month !== 'all' && !parsedMonth) return c.json({ error: 'Invalid month. Use YYYY-MM.' }, 400);
+  if (parsedMonth == null) return c.json({ error: 'Invalid month. Use YYYY-MM.' }, 400);
   if (parsedMonth !== 'all' && !parsedMonth.startsWith(`${year}-`)) {
     return c.json({ error: 'Month must be within the selected year.' }, 400);
   }
@@ -6254,6 +6254,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
             '<div class="action-row">' +
               '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
               '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
+              '<button type="button" data-duplicate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>複製</button>' +
               '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
               buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
               '</select>' +
@@ -6556,6 +6557,41 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     }
   }
 
+  async function duplicateEntry(id) {
+    const target = entries.find((e) => e.id === id);
+    if (!target) return;
+    const amountValue = Number(target.amount);
+    const payload = {
+      title: String(target.title || ''),
+      content: String(target.content || ''),
+      amount: Number.isFinite(amountValue) ? amountValue : 0,
+      type: target.type === 'expense' ? 'expense' : 'income',
+      scheduledDate: normalizeDate(String(target.scheduled_date || '')),
+      note: String(target.note || ''),
+      accountName: '',
+      customerName: String(target.customer_name || ''),
+      staffName: String(target.staff_name || ''),
+      labelColor: String(target.label_color || 'blue'),
+      cfCategory: String(target.cf_category || '')
+    };
+    try {
+      const res = await fetch('/api/entries', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        showBanner(statusBanner, 'error', '複製に失敗しました。');
+        return;
+      }
+      invalidateStatementFrame();
+      showBanner(statusBanner, 'ok', '予定を複製しました。');
+      await loadAll();
+    } catch (_) {
+      showBanner(statusBanner, 'error', '複製処理中に通信エラーが発生しました。');
+    }
+  }
+
   async function editEntryDate(id) {
     const target = entries.find((e) => e.id === id);
     if (!target) return;
@@ -6680,6 +6716,10 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     }
     if (btn.dataset.editactualdate) {
       editEntryActualDate(id);
+      return;
+    }
+    if (btn.dataset.duplicate) {
+      duplicateEntry(id);
       return;
     }
     if (btn.dataset.openedit) {
