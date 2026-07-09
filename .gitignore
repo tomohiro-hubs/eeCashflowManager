@@ -4,3 +4,4 @@ node_modules
 .DS_Store
 scratch/
 *.bak
+*.bak[0-9]*

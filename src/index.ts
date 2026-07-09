@@ -5829,7 +5829,6 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   }
 
   async function loadAll() {
-    console.time('loadAll TOTAL');
     visibleLimit = 100;
     const month = selectedMonth();
     const year = String(yearInput.value);
@@ -5841,7 +5840,6 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const { signal } = loadAllAbortController;
 
     try {
-      console.time('loadAll: API Fetch');
       // 数字の計算ロジックは従来と同じ。取得経路だけを「4本並列」から
       // 「集約API 1本」に変更している。集約が使えないときは従来の個別APIへ自動フォールバック。
       let summary = { income: 0, expense: 0, balance: 0 };
@@ -5883,7 +5881,6 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
           fetch('/api/today-balance', { signal })
         ]);
         if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
-          console.timeEnd('loadAll TOTAL');
           return false;
         }
         summary = summaryRes.ok ? await summaryRes.json() : summary;
@@ -5893,9 +5890,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         summaryOk = summaryRes.ok;
         entriesOk = entriesRes.ok;
       }
-      console.timeEnd('loadAll: API Fetch');
       if (signal.aborted || requestSeq < latestAppliedLoadAllSeq) {
-        console.timeEnd('loadAll TOTAL');
         return false;
       }
       latestAppliedLoadAllSeq = requestSeq;
@@ -5913,30 +5908,18 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         debugEntriesEl.textContent = entriesOk ? 'count=' + String(entries.length) : 'error';
       }
 
-      console.time('loadAll: updateSummary');
       updateSummary(summary);
-      console.timeEnd('loadAll: updateSummary');
 
-      console.time('loadAll: renderRows');
       renderRows();
-      console.timeEnd('loadAll: renderRows');
 
-      console.time('loadAll: syncListScrollPosition');
       syncListScrollPositionFromTable();
-      console.timeEnd('loadAll: syncListScrollPosition');
 
-      console.time('loadAll: updateSelectedMonthAlert');
       updateSelectedMonthAlert();
-      console.timeEnd('loadAll: updateSelectedMonthAlert');
 
-      console.time('loadAll: updateAnnualTodayBalance');
       updateAnnualTodayBalanceFromEntries();
-      console.timeEnd('loadAll: updateAnnualTodayBalance');
 
       if (annualSectionBody instanceof HTMLElement && !annualSectionBody.classList.contains('collapsed')) {
-        console.time('loadAll: loadAnnualEntries');
         await loadAnnualEntries(true);
-        console.timeEnd('loadAll: loadAnnualEntries');
       } else {
         annualEntriesLoadedKey = '';
         prefetchAnnualEntries();
@@ -5950,10 +5933,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       } else {
         hideBanner(statusBanner);
       }
-      console.timeEnd('loadAll TOTAL');
       return entriesOk;
     } catch (err) {
-      console.timeEnd('loadAll TOTAL');
       if (err instanceof DOMException && err.name === 'AbortError') {
         return false;
       }
@@ -6223,6 +6204,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const amount = Number(e.amount);
     const runningClass = entryRunning < 0 ? 'minus' : 'plus';
     const rowClass = Number(e.is_completed) === 1 ? 'completed' : '';
+    const actionAttrs = 'data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '');
+    const actionBtn = (attr, label) => '<button type="button" ' + attr + ' ' + actionAttrs + '>' + label + '</button>';
     const hasMgmt = String(e.import_management_no || '').trim() !== '';
     const expanded = expandedMgmtIds.has(Number(e.id));
     const toggleLabel = expanded ? '−' : '+';
@@ -6254,22 +6237,22 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
           '<td class="running ' + runningClass + '" data-list-col="running">' + (entryRunning > 0 ? '+' : '') + fmt.format(entryRunning) + '</td>' +
           '<td class="actions" data-list-col="actions">' +
             '<div class="action-row">' +
-              '<button type="button" data-move="top" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>先頭</button>' +
-              '<button type="button" data-move="up" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>上</button>' +
-              '<button type="button" data-move="down" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>下</button>' +
-              '<button type="button" data-move="bottom" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>末尾</button>' +
-              '<button type="button" data-delete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>削除</button>' +
-              '<button type="button" data-openedit="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>修正</button>' +
-              '<button type="button" data-complete="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' + (Number(e.is_completed) === 1 ? '完了済み' : '完了') + '</button>' +
-              '<select data-editcolor="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
+              actionBtn('data-move="top"', '先頭') +
+              actionBtn('data-move="up"', '上') +
+              actionBtn('data-move="down"', '下') +
+              actionBtn('data-move="bottom"', '末尾') +
+              actionBtn('data-delete="1"', '削除') +
+              actionBtn('data-openedit="1"', '修正') +
+              actionBtn('data-complete="1"', Number(e.is_completed) === 1 ? '完了済み' : '完了') +
+              '<select data-editcolor="1" ' + actionAttrs + '>' +
               buildLabelColorOptionsHtml(String(e.label_color || 'blue')) +
               '</select>' +
             '</div>' +
             '<div class="action-row">' +
-              '<button type="button" data-editdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>日付変更</button>' +
-              '<button type="button" data-editactualdate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>確定日</button>' +
-              '<button type="button" data-duplicate="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>複製</button>' +
-              '<select data-editcfcategory="1" data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '') + '>' +
+              actionBtn('data-editdate="1"', '日付変更') +
+              actionBtn('data-editactualdate="1"', '確定日') +
+              actionBtn('data-duplicate="1"', '複製') +
+              '<select data-editcfcategory="1" ' + actionAttrs + '>' +
               buildCfCategoryOptionsHtml(String(e.cf_category || ''), e.type) +
               '</select>' +
             '</div>' +
@@ -7795,26 +7778,18 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     renderRows();
     updateSelectedMonthAlert();
   });
-  listFilterDayEl?.addEventListener('change', () => {
-    renderRows();
-  });
-  listFilterDateFromEl?.addEventListener('change', () => {
-    renderRows();
-  });
-  listFilterDateToEl?.addEventListener('change', () => {
-    renderRows();
-  });
-  listFilterTypeEl?.addEventListener('change', () => {
-    renderRows();
-  });
-  listFilterCompletedEl?.addEventListener('change', () => {
-    renderRows();
-  });
-  listFilterLabelEl?.addEventListener('change', () => {
-    renderRows();
-  });
-  listFilterCfStatusEl?.addEventListener('change', () => {
-    renderRows();
+  [
+    listFilterDayEl,
+    listFilterDateFromEl,
+    listFilterDateToEl,
+    listFilterTypeEl,
+    listFilterCompletedEl,
+    listFilterLabelEl,
+    listFilterCfStatusEl
+  ].forEach((el) => {
+    el?.addEventListener('change', () => {
+      renderRows();
+    });
   });
   listFilterResetBtn?.addEventListener('click', () => {
     listFilterKeywordEl.value = '';
