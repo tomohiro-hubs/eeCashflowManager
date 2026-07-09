@@ -3481,6 +3481,9 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .reset-filter-button:hover {
       background: #dbe9f7;
     }
+    .date-range-filter { display: inline-flex; align-items: center; gap: 6px; }
+    .date-range-filter input[type="date"] { padding: 5px 8px; }
+    .date-range-sep { color: #64748b; font-weight: 700; }
 
     .banner { display: none; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; }
     .banner.show { display: block; }
@@ -4239,6 +4242,11 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       <select id="list-filter-day" aria-label="日絞り込み">
         <option value="all">日: すべて</option>
       </select>
+      <span class="date-range-filter" title="予定日を年月日〜年月日で絞り込みます">
+        <input id="list-filter-date-from" type="date" aria-label="絞り込み開始日" />
+        <span class="date-range-sep">〜</span>
+        <input id="list-filter-date-to" type="date" aria-label="絞り込み終了日" />
+      </span>
       <select id="list-filter-type" aria-label="区分絞り込み">
         <option value="all">区分: すべて</option>
         <option value="income">区分: 入金</option>
@@ -4764,6 +4772,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   const listFilterKeywordEl = document.getElementById('list-filter-keyword');
   const listFilterMonthEl = document.getElementById('list-filter-month');
   const listFilterDayEl = document.getElementById('list-filter-day');
+  const listFilterDateFromEl = document.getElementById('list-filter-date-from');
+  const listFilterDateToEl = document.getElementById('list-filter-date-to');
   const listFilterTypeEl = document.getElementById('list-filter-type');
   const listFilterCompletedEl = document.getElementById('list-filter-completed');
   const listFilterLabelEl = document.getElementById('list-filter-label');
@@ -6151,6 +6161,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const keyword = String(listFilterKeywordEl?.value || '').trim().toLowerCase();
     const monthFilter = String(listFilterMonthEl?.value || 'all');
     const dayFilter = String(listFilterDayEl?.value || 'all');
+    const dateFrom = normalizeDate(String(listFilterDateFromEl?.value || ''));
+    const dateTo = normalizeDate(String(listFilterDateToEl?.value || ''));
     const typeFilter = String(listFilterTypeEl?.value || 'all');
     const completedFilter = String(listFilterCompletedEl?.value || 'all');
     const labelFilter = String(listFilterLabelEl?.value || 'all');
@@ -6161,6 +6173,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         if (d.slice(5, 7) !== monthFilter) return false;
       }
       if (dayFilter !== 'all' && d.slice(8, 10) !== dayFilter) return false;
+      if (dateFrom && (!d || d < dateFrom)) return false;
+      if (dateTo && (!d || d > dateTo)) return false;
       if (typeFilter !== 'all' && e.type !== typeFilter) return false;
       const labelColor = String(e.label_color || 'blue');
       if (labelFilter !== 'all' && labelColor !== labelFilter) return false;
@@ -7784,6 +7798,12 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   listFilterDayEl?.addEventListener('change', () => {
     renderRows();
   });
+  listFilterDateFromEl?.addEventListener('change', () => {
+    renderRows();
+  });
+  listFilterDateToEl?.addEventListener('change', () => {
+    renderRows();
+  });
   listFilterTypeEl?.addEventListener('change', () => {
     renderRows();
   });
@@ -7800,6 +7820,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     listFilterKeywordEl.value = '';
     listFilterMonthEl.value = 'all';
     if (listFilterDayEl) listFilterDayEl.value = 'all';
+    if (listFilterDateFromEl) listFilterDateFromEl.value = '';
+    if (listFilterDateToEl) listFilterDateToEl.value = '';
     listFilterTypeEl.value = 'all';
     listFilterCompletedEl.value = 'all';
     listFilterLabelEl.value = 'all';
