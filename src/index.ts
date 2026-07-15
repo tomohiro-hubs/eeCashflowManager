@@ -1361,7 +1361,7 @@ app.post('/api/entries', async (c) => {
 
   const order = Number(maxRow?.max_order ?? 0) + 1;
 
-  await c.env.DB.prepare(
+  const insertResult = await c.env.DB.prepare(
     `INSERT INTO cashflow_entries
       (user_id, organization_id, title, content, amount, type, scheduled_date, order_index, note, account_name, actual_transaction_date, customer_name, staff_name, label_color, cf_category, is_sample, created_by_user_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
@@ -1385,6 +1385,7 @@ app.post('/api/entries', async (c) => {
       user.id
     )
     .run();
+  const newEntryId = Number(insertResult?.meta?.last_row_id ?? 0);
   await c.env.DB.prepare(
     `INSERT INTO user_operation_logs (user_id, action_type, target_type, detail)
      VALUES (?, 'add', 'cashflow_entry', ?)`
@@ -1396,7 +1397,7 @@ app.post('/api/entries', async (c) => {
     scheduledDate: validatedInput.scheduledDate
   })).run();
 
-  return c.json({ ok: true });
+  return c.json({ ok: true, entry: { id: newEntryId, orderIndex: order } });
 });
 
 app.post('/api/import/rakuraku', async (c) => {
@@ -4840,6 +4841,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
 
   const fmt = new Intl.NumberFormat('ja-JP');
   let entries = [];
+  // 楽観的更新: 追加直後のD1読み取り遅延で行が消えないよう、確定前の行を一時保持する。
+  const optimisticEntryById = new Map();
   let savingReorder = false;
   let openingBalance = 0;
   let annualTodayBalance = 0;
@@ -5899,7 +5902,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         return false;
       }
       latestAppliedLoadAllSeq = requestSeq;
-      entries = Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [];
+      entries = mergeOptimisticEntries(Array.isArray(entriesPayload.entries) ? entriesPayload.entries : [], year);
       openingBalance = Number(openingPayload.openingBalance || 0);
       annualTodayBalance = Number(todayBalancePayload.todayBalance || 0);
       syncMonthFilterOptions();
@@ -6192,6 +6195,36 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
 
   function patchEntryInMemory(id, patch) {
     entries = entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+  }
+
+  function compareEntriesForList(a, b) {
+    const da = String(a.scheduled_date || '');
+    const db = String(b.scheduled_date || '');
+    if (da !== db) return da < db ? -1 : 1;
+    const oa = Number(a.order_index || 0);
+    const ob = Number(b.order_index || 0);
+    if (oa !== ob) return oa - ob;
+    return Number(a.id || 0) - Number(b.id || 0);
+  }
+
+  // サーバー取得結果に、未反映の楽観的追加行（同一年のみ）を差し込む。
+  // 取得結果に既に含まれていれば楽観行は破棄する（重複防止・整合完了）。
+  function mergeOptimisticEntries(serverEntries, year) {
+    if (optimisticEntryById.size === 0) return serverEntries;
+    const presentIds = new Set(serverEntries.map((e) => Number(e.id)));
+    const merged = serverEntries.slice();
+    let injected = false;
+    for (const [oid, oentry] of optimisticEntryById) {
+      if (presentIds.has(Number(oid))) {
+        optimisticEntryById.delete(oid);
+        continue;
+      }
+      if (String(oentry.scheduled_date || '').slice(0, 4) !== String(year)) continue;
+      merged.push(oentry);
+      injected = true;
+    }
+    if (injected) merged.sort(compareEntriesForList);
+    return merged;
   }
 
   function buildRunningBalanceMap() {
@@ -6585,6 +6618,25 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       if (!res.ok) {
         showBanner(statusBanner, 'error', '複製に失敗しました。');
         return;
+      }
+      const data = safeJsonParse(await res.text()) || {};
+      const newId = Number(data.entry?.id ?? 0);
+      // 楽観的更新: サーバー再取得を待たず、複製行を即座に一覧へ反映する。
+      // 本番D1の書き込み直後の読み取り遅延で行が出ないのを防ぐ。
+      if (newId > 0) {
+        const newEntry = {
+          ...target,
+          id: newId,
+          order_index: Number(data.entry?.orderIndex ?? 0),
+          account_name: '',
+          actual_transaction_date: null,
+          is_completed: 0,
+          is_sample: 0,
+          import_management_no: ''
+        };
+        optimisticEntryById.set(newId, newEntry);
+        entries = [...entries, newEntry].sort(compareEntriesForList);
+        renderRows();
       }
       invalidateStatementFrame();
       showBanner(statusBanner, 'ok', '予定を複製しました。');
