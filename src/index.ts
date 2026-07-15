@@ -3522,6 +3522,11 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
 
     .table-wrap { overflow: auto; border: 1px solid #e1e8f0; border-radius: 10px; }
+    #list-section-body {
+      max-height: var(--list-body-max-height, 70vh);
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
     table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
     th, td { border-bottom: 1px solid #e7edf4; text-align: left; padding: 9px 8px; vertical-align: middle; }
     #rows th,
