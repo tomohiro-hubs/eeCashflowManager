@@ -114,6 +114,8 @@ const MAX_CONTENT_LENGTH = 140;
 const MAX_NOTE_LENGTH = 500;
 const MAX_AMOUNT = 10_000_000_000;
 const PASSWORD_RESET_TTL_MINUTES = 30;
+const LEGACY_HOSTNAME = 'cashflow-worker-app.tomohiroyamazaki0.workers.dev';
+const CANONICAL_HOSTNAME = 'cashflowee.energio-hub.work';
 const PASSWORD_ALGO_PBKDF2 = 'pbkdf2_sha256_310000';
 const PASSWORD_ALGO_LEGACY = 'sha256_iter120k';
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
@@ -373,6 +375,19 @@ function serializeError(error: unknown): { message: string; name: string | null;
   }
   return { message: String(error ?? 'Unknown error'), name: null, stack: null };
 }
+
+// 旧URL(workers.dev)へのアクセスはカスタムドメインへ恒久リダイレクトする。
+// パス・クエリはそのまま引き継ぐ。localhost などの開発環境は対象外。
+app.use('*', async (c, next) => {
+  const url = new URL(c.req.url);
+  if (url.hostname !== LEGACY_HOSTNAME) return next();
+  url.protocol = 'https:';
+  url.hostname = CANONICAL_HOSTNAME;
+  url.port = '';
+  // GET/HEAD は 301、それ以外はメソッドとボディを保持する 308 を使う。
+  const isSafeMethod = c.req.method === 'GET' || c.req.method === 'HEAD';
+  return c.redirect(url.toString(), isSafeMethod ? 301 : 308);
+});
 
 app.use('*', async (c, next) => {
   await next();
