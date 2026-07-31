@@ -8170,15 +8170,14 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const incomeCol = entriesExcelColumnLabel(headers.indexOf('入金金額') + 1);
     const expenseCol = entriesExcelColumnLabel(headers.indexOf('出金金額') + 1);
     const balanceCol = entriesExcelColumnLabel(headers.indexOf('残高') + 1);
-    const rows = filtered.map((e, idx) => {
+    // 2行目は前年度繰越金の行。残高は手入力してもらうため空欄にしておく。
+    const carryOverRow = headers.map((name) => (name === '件名' ? '前年度繰越金' : ''));
+    const dataRows = filtered.map((e, idx) => {
       const amount = Number(e.amount) || 0;
       const isIncome = e.type === 'income';
-      const excelRow = idx + 2; // 1行目はヘッダー行
-      // 最初のデータ行(2行目)は前年度繰越金を手入力するため空欄。
-      // 3行目以降は「前の行の残高 + 入金金額 - 出金金額」。
-      const balance = excelRow === 2
-        ? ''
-        : { formula: balanceCol + String(excelRow - 1) + '+' + incomeCol + String(excelRow) + '-' + expenseCol + String(excelRow) };
+      const excelRow = idx + 3; // 1行目=ヘッダー / 2行目=前年度繰越金
+      // 残高は「前の行の残高 + 入金金額 - 出金金額」。3行目は繰越金の行を参照する。
+      const balance = { formula: balanceCol + String(excelRow - 1) + '+' + incomeCol + String(excelRow) + '-' + expenseCol + String(excelRow) };
       return [
         e.id || '',
         e.scheduled_date || '',
@@ -8198,6 +8197,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         e.import_management_no || ''
       ];
     });
+    const rows = [carryOverRow, ...dataRows];
     let exportStep = '開始前';
     try {
       exportStep = 'Excelワークブック生成';
