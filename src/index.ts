@@ -116,8 +116,15 @@ const MAX_AMOUNT = 10_000_000_000;
 const PASSWORD_RESET_TTL_MINUTES = 30;
 const LEGACY_HOSTNAME = 'cashflow-worker-app.tomohiroyamazaki0.workers.dev';
 const CANONICAL_HOSTNAME = 'cashflowee.energio-hub.work';
-const PASSWORD_ALGO_PBKDF2 = 'pbkdf2_sha256_310000';
+// 本番のCloudflare Workersでは反復回数の多いPBKDF2が失敗することがあるため、
+// 保存に使う既定は10万回に下げる。過去に保存された31万回のハッシュも検証だけは継続対応する。
+const PASSWORD_ALGO_PBKDF2 = 'pbkdf2_sha256_100000';
+const PASSWORD_ALGO_PBKDF2_310K = 'pbkdf2_sha256_310000';
 const PASSWORD_ALGO_LEGACY = 'sha256_iter120k';
+const PBKDF2_DEFAULT_ITERATIONS = 100_000;
+
+// ハッシュ計算自体が失敗したことを「パスワード誤り」と区別するための例外。
+class PasswordHashUnavailableError extends Error {}
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_BLOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
@@ -512,8 +519,7 @@ app.post('/register', async (c) => {
     return c.html(renderAuthPage('register', 'このメールアドレスは既に登録されています。'), 409);
   }
 
-  const salt = randomToken(16);
-  const passwordHash = await hashPasswordPbkdf2(password, salt);
+  const created = await createPasswordHash(password);
 
   await c.env.DB.prepare(
     `INSERT OR IGNORE INTO organizations (id, name, created_at)
@@ -522,7 +528,7 @@ app.post('/register', async (c) => {
   await c.env.DB.prepare(
     `INSERT INTO users (email, password_hash, password_salt, password_algo, organization_id, created_at)
      VALUES (?, ?, ?, ?, 1, datetime('now'))`
-  ).bind(email, passwordHash, salt, PASSWORD_ALGO_PBKDF2).run();
+  ).bind(email, created.hash, created.salt, created.algo).run();
 
   const createdUser = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
     .bind(email)
@@ -558,7 +564,16 @@ app.post('/login', async (c) => {
     return c.html(renderAuthPage('login', 'メールアドレスまたはパスワードが違います。'), 401);
   }
 
-  const isValidPassword = await verifyPassword(password, user.password_salt, user.password_hash, user.password_algo);
+  let isValidPassword = false;
+  try {
+    isValidPassword = await verifyPassword(password, user.password_salt, user.password_hash, user.password_algo);
+  } catch (verifyError) {
+    if (verifyError instanceof PasswordHashUnavailableError) {
+      // サーバー側の障害。失敗回数に数えるとロックアウトしてしまうため記録しない。
+      return c.html(renderAuthPage('login', '認証処理でエラーが発生しました。時間をおいて再試行するか管理者にご連絡ください。'), 503);
+    }
+    throw verifyError;
+  }
   if (!isValidPassword) {
     await recordLoginFailure(c.env.DB, loginRateLimitKey);
     return c.html(renderAuthPage('login', 'メールアドレスまたはパスワードが違います。'), 401);
@@ -569,13 +584,14 @@ app.post('/login', async (c) => {
   const currentAlgo = (user.password_algo ?? PASSWORD_ALGO_LEGACY).trim();
   if (currentAlgo !== PASSWORD_ALGO_PBKDF2) {
     try {
-      const nextSalt = randomToken(16);
-      const nextHash = await hashPasswordPbkdf2(password, nextSalt);
+      const next = await createPasswordHash(password);
+      // フォールバックで同じ旧方式になった場合は書き換えない（無意味な更新を避ける）。
+      if (next.algo !== PASSWORD_ALGO_PBKDF2) throw new Error('pbkdf2 unavailable; keep current hash');
       await c.env.DB.prepare(
         `UPDATE users
          SET password_hash = ?, password_salt = ?, password_algo = ?
          WHERE id = ?`
-      ).bind(nextHash, nextSalt, PASSWORD_ALGO_PBKDF2, user.id).run();
+      ).bind(next.hash, next.salt, next.algo, user.id).run();
     } catch (rehashError) {
       console.error('password rehash migration skipped', rehashError);
     }
@@ -826,18 +842,25 @@ app.post('/password-change', async (c) => {
   ).bind(user.id).first<{ password_hash: string; password_salt: string; password_algo: string | null }>();
   if (!dbUser) return c.redirect('/login');
 
-  const isValid = await verifyPassword(currentPassword, dbUser.password_salt, dbUser.password_hash, dbUser.password_algo);
+  let isValid = false;
+  try {
+    isValid = await verifyPassword(currentPassword, dbUser.password_salt, dbUser.password_hash, dbUser.password_algo);
+  } catch (verifyError) {
+    if (verifyError instanceof PasswordHashUnavailableError) {
+      return c.html(renderPasswordChangePage(user.email, '認証処理でエラーが発生しました。管理者にご連絡ください。'), 503);
+    }
+    throw verifyError;
+  }
   if (!isValid) {
     return c.html(renderPasswordChangePage(user.email, '現在のパスワードが違います。'), 401);
   }
 
-  const nextSalt = randomToken(16);
-  const nextHash = await hashPasswordPbkdf2(newPassword, nextSalt);
+  const next = await createPasswordHash(newPassword);
   await c.env.DB.prepare(
     `UPDATE users
      SET password_hash = ?, password_salt = ?, password_algo = ?
      WHERE id = ?`
-  ).bind(nextHash, nextSalt, PASSWORD_ALGO_PBKDF2, user.id).run();
+  ).bind(next.hash, next.salt, next.algo, user.id).run();
 
   return c.html(renderPasswordChangePage(user.email, 'パスワードを更新しました。', true));
 });
@@ -10817,7 +10840,11 @@ async function hashPassword(password: string, salt: string): Promise<string> {
   return [...state].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function hashPasswordPbkdf2(password: string, salt: string): Promise<string> {
+async function hashPasswordPbkdf2(
+  password: string,
+  salt: string,
+  iterations: number = PBKDF2_DEFAULT_ITERATIONS
+): Promise<string> {
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(password),
@@ -10830,7 +10857,7 @@ async function hashPasswordPbkdf2(password: string, salt: string): Promise<strin
       name: 'PBKDF2',
       hash: 'SHA-256',
       salt: new TextEncoder().encode(salt),
-      iterations: 310_000
+      iterations
     },
     keyMaterial,
     256
@@ -10838,16 +10865,37 @@ async function hashPasswordPbkdf2(password: string, salt: string): Promise<strin
   return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// 保存用のハッシュを作る。PBKDF2が使えない環境では、その場で検証まで確認できた
+// 旧方式へ自動フォールバックする（保存できても検証できないハッシュを作らないため）。
+async function createPasswordHash(password: string): Promise<{ hash: string; salt: string; algo: string }> {
+  const salt = randomToken(16);
+  try {
+    const hash = await hashPasswordPbkdf2(password, salt);
+    const verified = await hashPasswordPbkdf2(password, salt);
+    if (!constantTimeEqual(hash, verified)) throw new Error('pbkdf2 roundtrip mismatch');
+    return { hash, salt, algo: PASSWORD_ALGO_PBKDF2 };
+  } catch (err) {
+    console.error('pbkdf2 unavailable, falling back to legacy hashing', err);
+    const legacySalt = randomToken(16);
+    const hash = await hashPassword(password, legacySalt);
+    return { hash, salt: legacySalt, algo: PASSWORD_ALGO_LEGACY };
+  }
+}
+
 async function verifyPassword(password: string, salt: string, expectedHash: string, algoRaw?: string | null): Promise<boolean> {
   const algo = (algoRaw ?? PASSWORD_ALGO_LEGACY).trim();
-  if (algo === PASSWORD_ALGO_PBKDF2) {
+  if (algo === PASSWORD_ALGO_PBKDF2 || algo === PASSWORD_ALGO_PBKDF2_310K) {
+    const iterations = algo === PASSWORD_ALGO_PBKDF2_310K ? 310_000 : PBKDF2_DEFAULT_ITERATIONS;
+    let calculated: string;
     try {
-      const calculated = await hashPasswordPbkdf2(password, salt);
-      return constantTimeEqual(calculated, expectedHash);
+      calculated = await hashPasswordPbkdf2(password, salt, iterations);
     } catch (err) {
+      // ここで false を返すと「パスワード誤り」に化けてロックアウトを招くため、
+      // サーバー側の障害として区別できる例外を投げる。
       console.error('pbkdf2 verify failed', err);
-      return false;
+      throw new PasswordHashUnavailableError('pbkdf2 unavailable');
     }
+    return constantTimeEqual(calculated, expectedHash);
   }
   const calculated = await hashPassword(password, salt);
   return constantTimeEqual(calculated, expectedHash);
