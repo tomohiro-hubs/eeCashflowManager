@@ -8017,12 +8017,19 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     return styleId === null ? '<c/>' : '<c s="' + String(styleId) + '"/>';
   }
 
+  // 残高列のように「値ではなく数式」を書き出すためのセル。
+  function entriesXmlFormulaCell(formula, style = 1) {
+    return '<c s="' + String(style) + '"><f>' + escapeEntriesExcelXml(formula) + '</f></c>';
+  }
+
   function buildEntriesWorkbook(headers, rows, onStep) {
     const XLSX_MAIN_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
     const XLSX_REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
     const PKG_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
     onStep?.('一覧データ整形');
-    const numericColumns = new Set([0, 6]);
+    const numericColumns = new Set(
+      ['ID', '入金金額', '出金金額', '残高', '金額'].map((name) => headers.indexOf(name)).filter((i) => i >= 0)
+    );
     // 紫(purple)と桃(pink)は意図的に未設定。ここに無い色はExcelでは塗りなし(白)になる。
     const labelColorFillMap = {
       red: 'FFFFCCCC',
@@ -8041,10 +8048,15 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       const numericStyleId = index * 2 + 3;
       return [key, { textStyleId, numericStyleId, fillId }];
     }));
+    // 列位置はヘッダー名から求める（列を増減しても参照がずれないようにする）。
+    const labelColumnIndex = headers.indexOf('ラベル');
     const sheetRows = [headers, ...rows].map((row, rowIndex) => {
-      const labelColorKey = rowIndex > 0 ? String(row[12] || '') : '';
+      const labelColorKey = rowIndex > 0 && labelColumnIndex >= 0 ? String(row[labelColumnIndex] || '') : '';
       const rowStyle = rowStyleMap.get(labelColorKey);
       const cells = row.map((value, cellIndex) => {
+        if (value && typeof value === 'object' && value.formula) {
+          return entriesXmlFormulaCell(String(value.formula), rowStyle?.numericStyleId ?? 1);
+        }
         if (value === null || value === undefined || value === '') {
           return entriesXmlEmptyCell(rowIndex > 0 && rowStyle ? rowStyle.textStyleId : null);
         }
@@ -8153,23 +8165,39 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       showBanner(statusBanner, 'warn', '出力するデータがありません。');
       return;
     }
-    const headers = ['ID', '予定日', '区分', 'CF区分', '件名', '内容', '金額', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'];
-    const rows = filtered.map((e, idx) => [
-      e.id || '',
-      e.scheduled_date || '',
-      e.type === 'income' ? '入金' : '出金',
-      e.cf_category || '',
-      e.title || '',
-      e.content || '',
-      e.amount || 0,
-      e.note || '',
-      e.actual_transaction_date || '',
-      e.customer_name || '',
-      e.staff_name || '',
-      Number(e.is_completed) === 1 ? '完了' : '未完了',
-      e.label_color || 'blue',
-      e.import_management_no || ''
-    ]);
+    const headers = ['ID', '予定日', '区分', 'CF区分', '件名', '内容', '入金金額', '出金金額', '残高', 'メモ', '入出金日', '顧客名', '担当社員名', '完了状態', 'ラベル', '管理番号'];
+    // 残高の数式で参照する列記号をヘッダー位置から求める（列を増減しても壊れないようにする）。
+    const incomeCol = entriesExcelColumnLabel(headers.indexOf('入金金額') + 1);
+    const expenseCol = entriesExcelColumnLabel(headers.indexOf('出金金額') + 1);
+    const balanceCol = entriesExcelColumnLabel(headers.indexOf('残高') + 1);
+    const rows = filtered.map((e, idx) => {
+      const amount = Number(e.amount) || 0;
+      const isIncome = e.type === 'income';
+      const excelRow = idx + 2; // 1行目はヘッダー行
+      // 最初のデータ行(2行目)は前年度繰越金を手入力するため空欄。
+      // 3行目以降は「前の行の残高 + 入金金額 - 出金金額」。
+      const balance = excelRow === 2
+        ? ''
+        : { formula: balanceCol + String(excelRow - 1) + '+' + incomeCol + String(excelRow) + '-' + expenseCol + String(excelRow) };
+      return [
+        e.id || '',
+        e.scheduled_date || '',
+        isIncome ? '入金' : '出金',
+        e.cf_category || '',
+        e.title || '',
+        e.content || '',
+        isIncome ? amount : '',
+        isIncome ? '' : amount,
+        balance,
+        e.note || '',
+        e.actual_transaction_date || '',
+        e.customer_name || '',
+        e.staff_name || '',
+        Number(e.is_completed) === 1 ? '完了' : '未完了',
+        e.label_color || 'blue',
+        e.import_management_no || ''
+      ];
+    });
     let exportStep = '開始前';
     try {
       exportStep = 'Excelワークブック生成';
@@ -9040,7 +9068,9 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
 
   function buildEntriesWorkbook(headers, rows, onStep) {
     onStep?.('一覧データ整形');
-    const numericColumns = new Set([0, 6]);
+    const numericColumns = new Set(
+      ['ID', '入金金額', '出金金額', '残高', '金額'].map((name) => headers.indexOf(name)).filter((i) => i >= 0)
+    );
     // 紫(purple)と桃(pink)は意図的に未設定。ここに無い色はExcelでは塗りなし(白)になる。
     const labelColorFillMap = {
       red: 'FFFFCCCC',
