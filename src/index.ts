@@ -8021,13 +8021,16 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const PKG_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
     onStep?.('一覧データ整形');
     const numericColumns = new Set([0, 6]);
+    // 紫(purple)と桃(pink)は意図的に未設定。ここに無い色はExcelでは塗りなし(白)になる。
     const labelColorFillMap = {
       red: 'FFFFCCCC',
+      orange: 'FFF4B183',
       yellow: 'FFFFFF00',
       green: 'FFE2EFDA',
       lightblue: 'FFDDEBF7',
       brown: 'FFBF8F00',
-      blue: 'FFBDD7EE'
+      blue: 'FFBDD7EE',
+      gray: 'FFD9D9D9'
     };
     const fillEntries = Object.entries(labelColorFillMap);
     const rowStyleMap = new Map(fillEntries.map(([key], index) => {
@@ -9036,13 +9039,16 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
   function buildEntriesWorkbook(headers, rows, onStep) {
     onStep?.('一覧データ整形');
     const numericColumns = new Set([0, 6]);
+    // 紫(purple)と桃(pink)は意図的に未設定。ここに無い色はExcelでは塗りなし(白)になる。
     const labelColorFillMap = {
       red: 'FFFFCCCC',
+      orange: 'FFF4B183',
       yellow: 'FFFFFF00',
       green: 'FFE2EFDA',
       lightblue: 'FFDDEBF7',
       brown: 'FFBF8F00',
-      blue: 'FFBDD7EE'
+      blue: 'FFBDD7EE',
+      gray: 'FFD9D9D9'
     };
     const fillEntries = Object.entries(labelColorFillMap);
     const rowStyleMap = new Map(fillEntries.map(([key], index) => {
