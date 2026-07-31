@@ -407,7 +407,9 @@ app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
   c.header('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
-  c.header('Content-Security-Policy', `default-src 'self'; base-uri 'self'; frame-ancestors ${cspFrameAncestors}; form-action 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'`);
+  // Cloudflare Web Analytics のビーコンはエッジがHTMLへ自動挿入するため、
+  // スクリプト読み込み元(static.cloudflareinsights.com)と計測結果の送信先を許可する。
+  c.header('Content-Security-Policy', `default-src 'self'; base-uri 'self'; frame-ancestors ${cspFrameAncestors}; form-action 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com`);
 });
 
 app.use('*', async (c, next) => {
