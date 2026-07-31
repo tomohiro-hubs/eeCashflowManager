@@ -8027,7 +8027,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
       green: 'FFE2EFDA',
       lightblue: 'FFDDEBF7',
       brown: 'FFBF8F00',
-      blue: 'FFC6E0B4'
+      blue: 'FFBDD7EE'
     };
     const fillEntries = Object.entries(labelColorFillMap);
     const rowStyleMap = new Map(fillEntries.map(([key], index) => {
@@ -9041,7 +9041,7 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
       green: 'FFE2EFDA',
       lightblue: 'FFDDEBF7',
       brown: 'FFBF8F00',
-      blue: 'FFC6E0B4'
+      blue: 'FFBDD7EE'
     };
     const fillEntries = Object.entries(labelColorFillMap);
     const rowStyleMap = new Map(fillEntries.map(([key], index) => {
