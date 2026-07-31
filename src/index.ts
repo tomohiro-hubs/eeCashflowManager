@@ -8064,7 +8064,6 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<workbook xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
       '<fileVersion appName="xl"/>' +
-      '<workbookPr calcMode="auto"/>' +
       '<bookViews><workbookView activeTab="0"/></bookViews>' +
       '<sheets><sheet name="予定一覧" sheetId="1" r:id="rId1"/></sheets>' +
       '</workbook>';
@@ -9069,7 +9068,6 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
     const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<workbook xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
       '<fileVersion appName="xl"/>' +
-      '<workbookPr calcMode="auto"/>' +
       '<bookViews><workbookView activeTab="0"/></bookViews>' +
       '<sheets><sheet name="予定一覧" sheetId="1" r:id="rId1"/></sheets>' +
       '</workbook>';
@@ -9224,7 +9222,6 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
     const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<workbook xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
       '<fileVersion appName="xl"/>' +
-      '<workbookPr calcMode="auto"/>' +
       '<bookViews><workbookView activeTab="0"/></bookViews>' +
       '<sheets><sheet name="資金繰り表" sheetId="1" r:id="rId1"/></sheets>' +
       '<calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>' +
