@@ -6891,9 +6891,8 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   entryEditClose?.addEventListener('click', () => {
     closeEntryEditModal();
   });
-  entryEditModal?.addEventListener('click', (ev) => {
-    if (ev.target === entryEditModal) closeEntryEditModal();
-  });
+  // 入力中の誤操作で閉じないよう、モーダル外クリックでは閉じない。
+  // 解除は「保存」「キャンセル」「×」のいずれかの操作に限定する。
   entryEditForm?.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (!(entryEditSave instanceof HTMLButtonElement)) return;
