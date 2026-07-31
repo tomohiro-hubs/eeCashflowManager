@@ -8906,6 +8906,14 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
     window.setTimeout(() => window.print(), 0);
   }
 
+  // 予定一覧ページ側の同名関数とは別スクリプトのため、このページにも定義が必要。
+  function formatLocalDateIso(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return year + '-' + month + '-' + day;
+  }
+
   function buildExportFileName(extension) {
     const startKey = String(rangeStartEl?.value || '');
     const endKey = String(rangeEndEl?.value || '');
@@ -9211,7 +9219,9 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
       1,
       ...exportRows.map((row) => Array.from(row.children).filter((cell) => cell instanceof HTMLElement && !cell.classList.contains('col-hidden')).length)
     );
-    const usedRange = 'A1:' + toExcelColumnLabel(usedColumnCount) + sheetRows.length;
+    // sheetRows は結合済みの文字列なので、.length は文字数であって行数ではない。
+    // 実際の行数は元になった行要素の数を使う。
+    const usedRange = 'A1:' + toExcelColumnLabel(usedColumnCount) + String(exportRows.length);
     const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<worksheet xmlns="' + XLSX_MAIN_NS + '" xmlns:r="' + XLSX_REL_NS + '">' +
       '<dimension ref="' + usedRange + '"/>' +
