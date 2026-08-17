@@ -3724,6 +3724,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     #list-section-body.hide-col-actions [data-list-col="actions"] { display: none !important; }
     .action-row { display: flex; gap: 4px; flex-wrap: nowrap; }
     .actions button, .actions select { padding: 5px 6px; font-size: 11px; min-width: 0; white-space: nowrap; }
+    .actions button:disabled, .actions select:disabled { opacity: .45; cursor: not-allowed; color: var(--muted); }
     .label-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 6px; border: 1px solid rgba(0,0,0,.15); vertical-align: middle; }
     .label-red { background: #ef4444; }
     .label-orange { background: #f97316; }
@@ -6282,8 +6283,15 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const amount = Number(e.amount);
     const runningClass = entryRunning < 0 ? 'minus' : 'plus';
     const rowClass = Number(e.is_completed) === 1 ? 'completed' : '';
+    const isCompleted = Number(e.is_completed) === 1;
     const actionAttrs = 'data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '');
     const actionBtn = (attr, label) => '<button type="button" ' + attr + ' ' + actionAttrs + '>' + label + '</button>';
+    // 完了済みの予定は誤操作防止のため「削除」「修正」を押せないようにする。
+    const lockedActionBtn = (attr, label) =>
+      '<button type="button" ' + attr + ' data-id="' + e.id + '"' +
+      (savingReorder || isCompleted ? ' disabled' : '') +
+      (isCompleted ? ' title="完了済みの予定は修正・削除できません。先に「完了済み」を押して未完了に戻してください。"' : '') +
+      '>' + label + '</button>';
     const hasMgmt = String(e.import_management_no || '').trim() !== '';
     const expanded = expandedMgmtIds.has(Number(e.id));
     const toggleLabel = expanded ? '−' : '+';
@@ -6319,9 +6327,9 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
               actionBtn('data-move="up"', '上') +
               actionBtn('data-move="down"', '下') +
               actionBtn('data-move="bottom"', '末尾') +
-              actionBtn('data-delete="1"', '削除') +
-              actionBtn('data-openedit="1"', '修正') +
-              actionBtn('data-complete="1"', Number(e.is_completed) === 1 ? '完了済み' : '完了') +
+              lockedActionBtn('data-delete="1"', '削除') +
+              lockedActionBtn('data-openedit="1"', '修正') +
+              actionBtn('data-complete="1"', isCompleted ? '完了済み' : '完了') +
               '<select data-editcolor="1" ' + actionAttrs + '>' +
               buildLabelColorOptionsHtml(String(e.label_color || 'blue')) +
               '</select>' +
@@ -6597,6 +6605,10 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   async function deleteEntry(id) {
     const target = entries.find((e) => e.id === id);
     if (!target) return;
+    if (Number(target.is_completed) === 1) {
+      showBanner(statusBanner, 'warn', '完了済みの予定は削除できません。先に未完了に戻してください。');
+      return;
+    }
     const confirmed = window.confirm('この予定を削除しますか？\\n' + target.scheduled_date + ' / ' + target.title);
     if (!confirmed) return;
 
@@ -6818,7 +6830,12 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     }
     if (btn.dataset.openedit) {
       const target = entries.find((e) => e.id === id);
-      if (target) showEntryEditModal(target);
+      if (!target) return;
+      if (Number(target.is_completed) === 1) {
+        showBanner(statusBanner, 'warn', '完了済みの予定は修正できません。先に未完了に戻してください。');
+        return;
+      }
+      showEntryEditModal(target);
       return;
     }
     const dir = String(btn.dataset.move || '');
