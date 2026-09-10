@@ -3948,6 +3948,25 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     .entry-edit-grid .full {
       grid-column: 1 / -1;
     }
+    /* 日付入力と「本日」ボタンを横並びにする。.field > input の幅指定が効かなくなるためここで指定する。 */
+    .date-with-today {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      min-width: 0;
+    }
+    .date-with-today > input {
+      flex: 1 1 auto;
+      width: 100%;
+      min-width: 0;
+    }
+    .date-with-today > .date-today-btn {
+      flex: 0 0 auto;
+      padding: 9px 10px;
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
     .entry-edit-actions {
       display: flex;
       justify-content: flex-end;
@@ -4623,8 +4642,11 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         </div>
         <div class="field">
           <label for="entry-edit-scheduled-date">予定日</label>
-          <input id="entry-edit-scheduled-date" name="scheduledDate" type="date" required />
-          <div class="field-hint">予定日を修正</div>
+          <div class="date-with-today">
+            <input id="entry-edit-scheduled-date" name="scheduledDate" type="date" required />
+            <button id="entry-edit-scheduled-date-today" type="button" class="secondary date-today-btn">本日</button>
+          </div>
+          <div class="field-hint">予定日を修正 /「本日」で今日の日付</div>
         </div>
         <div class="field">
           <label for="entry-edit-actual-date">入出金日</label>
@@ -4778,6 +4800,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   const entryEditType = document.getElementById('entry-edit-type');
   const entryEditLabelColor = document.getElementById('entry-edit-label-color');
   const entryEditScheduledDate = document.getElementById('entry-edit-scheduled-date');
+  const entryEditScheduledDateToday = document.getElementById('entry-edit-scheduled-date-today');
   const entryEditActualDate = document.getElementById('entry-edit-actual-date');
   const entryEditCfCategory = document.getElementById('entry-edit-cf-category');
   const entryEditNote = document.getElementById('entry-edit-note');
@@ -6904,6 +6927,12 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   entryEditType?.addEventListener('change', () => {
     syncEntryEditCfCategoryOptions();
   });
+  entryEditScheduledDateToday?.addEventListener('click', () => {
+    if (!(entryEditScheduledDate instanceof HTMLInputElement)) return;
+    entryEditScheduledDate.value = formatLocalDateIso(new Date());
+    entryEditScheduledDate.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
   entryEditCancel?.addEventListener('click', () => {
     closeEntryEditModal();
   });
