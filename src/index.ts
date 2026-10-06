@@ -8699,10 +8699,12 @@ function renderCashflowStatementPage(
       const cellClass = isNumber ? `num${value < 0 ? ' neg' : ''}` : 'empty';
       return `<td class="${cellClass}" data-col-key="${escapeHtml(column.key)}">${formatCashflowStatementValue(value)}</td>`;
     }).join('');
+    // 合計列の値は表示中の月範囲に合わせてクライアント側で計算する。
     return `<tr class="${rowClass}" data-row-no="${row.rowNo}">
       <th scope="row" class="sticky-col sticky-label">${label}</th>
       <td class="sticky-col sticky-sub">${subLabel}</td>
       ${cells}
+      <td class="total-col empty">–</td>
     </tr>`;
   }).join('');
   const headerYearCells = displayColumns
@@ -8787,6 +8789,7 @@ function renderCashflowStatementPage(
     .row-subitem .sticky-sub { padding-left:22px; color:#44556b; }
     .row-gap > * { border-top:8px solid #fff; }
     .col-hidden { display:none; }
+    .total-col { min-width:104px; font-weight:700; background:var(--sum); border-left:2px solid #c3cfdc; }
     .status-実績 { background:var(--actual); }
     .status-計画 { background:var(--plan); }
     .status-合計 { background:var(--sum); }
@@ -8878,11 +8881,13 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
             <th class="sticky-col sticky-label">項目</th>
             <th class="sticky-col sticky-sub">補足</th>
             ${headerYearCells}
+            <th class="month-col total-col">合計</th>
           </tr>
           <tr>
             <th class="sticky-col sticky-label">区分</th>
             <th class="sticky-col sticky-sub">内訳</th>
             ${headerStatusCells}
+            <th class="month-col total-col status-合計">表示期間</th>
           </tr>
         </thead>
         <tbody>
@@ -8937,6 +8942,40 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
     return { ok: true, startIndex, endIndex, monthCount: endIndex - startIndex + 1 };
   }
 
+  function parseStatementCellNumber(cell) {
+    const text = (cell.textContent || '').trim();
+    if (text === '' || text === '–') return null;
+    const value = Number(text.replaceAll(',', ''));
+    return Number.isFinite(value) ? value : null;
+  }
+
+  // 前月繰越(6)は期首の値、次月繰越金(59)は期末の値。残高を足し合わせても意味がないため。
+  const OPENING_BALANCE_ROW_NO = 6;
+  const CLOSING_BALANCE_ROW_NO = 59;
+
+  function updateRowTotals() {
+    const rows = statementTableEl?.querySelectorAll('tbody tr[data-row-no]') || [];
+    rows.forEach((row) => {
+      const totalCell = row.querySelector('td.total-col');
+      if (!totalCell) return;
+      const rowNo = Number(row.getAttribute('data-row-no') || '0');
+      const values = Array.from(row.querySelectorAll('td[data-col-key]'))
+        .filter((cell) => !cell.classList.contains('col-hidden'))
+        .map(parseStatementCellNumber)
+        .filter((value) => value !== null);
+      let total = null;
+      if (values.length > 0) {
+        if (rowNo === OPENING_BALANCE_ROW_NO) total = values[0];
+        else if (rowNo === CLOSING_BALANCE_ROW_NO) total = values[values.length - 1];
+        else total = values.reduce((sum, value) => sum + value, 0);
+      }
+      totalCell.textContent = total === null ? '–' : new Intl.NumberFormat('ja-JP').format(total);
+      totalCell.classList.toggle('empty', total === null);
+      totalCell.classList.toggle('num', total !== null);
+      totalCell.classList.toggle('neg', total !== null && total < 0);
+    });
+  }
+
   function applySelectedRange() {
     const result = getSelectedMonthRange();
     if (!result.ok) {
@@ -8952,6 +8991,7 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
       const key = cell.getAttribute('data-col-key') || '';
       cell.classList.toggle('col-hidden', !visibleColumnKeys.has(key));
     });
+    updateRowTotals();
     syncStatementScrollMetrics();
     if (tableWrapEl) tableWrapEl.scrollLeft = 0;
     if (topScrollEl) topScrollEl.scrollLeft = 0;
@@ -9258,6 +9298,16 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
         const text = cell.textContent || '';
         const monthCellIndex = cellIndex - 2;
         const monthColumnNumber = cellIndex + 1;
+        if (rowNo > 0 && cell.classList.contains('total-col')) {
+          const cellText = text.trim();
+          const firstMonthColumn = toExcelColumnLabel(3);
+          const lastMonthColumn = toExcelColumnLabel(monthColumnNumber - 1);
+          if (cellText === '' || cellText === '–' || monthColumnNumber <= 3) return '<c/>';
+          const numericValue = Number(cellText.replaceAll(',', ''));
+          if (rowNo === OPENING_BALANCE_ROW_NO) return xmlFormulaCell(firstMonthColumn + sheetRowNo, numericValue);
+          if (rowNo === CLOSING_BALANCE_ROW_NO) return xmlFormulaCell(lastMonthColumn + sheetRowNo, numericValue);
+          return xmlFormulaCell('SUM(' + firstMonthColumn + sheetRowNo + ':' + lastMonthColumn + sheetRowNo + ')', numericValue);
+        }
         if (rowNo > 0 && monthCellIndex >= 0) {
           const cellText = text.trim();
           const numericValue = cellText === '' || cellText === '–' ? 0 : Number(cellText.replaceAll(',', ''));
