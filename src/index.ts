@@ -1177,15 +1177,13 @@ app.get('/api/today-balance', async (c) => {
   if (auth instanceof Response) return auth;
   const { organizationId } = auth;
 
-  const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
-  const todayStr = jstNow.toISOString().slice(0, 10);
-
+  // 完了済みは実際に入出金済みなので、予定日が未来（前倒しで支払った等）でも残高に含める。
   const row = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as balance
      FROM cashflow_entries
-     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date <= ?`
+     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1`
   )
-    .bind(organizationId, todayStr)
+    .bind(organizationId)
     .first<{ balance: number }>();
 
   return c.json({ todayBalance: Number(row?.balance ?? 0) });
@@ -1211,8 +1209,6 @@ app.get('/api/app-bootstrap', async (c) => {
 
   try {
     const { startDate, endDate } = getYearDateRange(year);
-    const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
-    const todayStr = jstNow.toISOString().slice(0, 10);
 
     // 4クエリを同時に投げる。allSettled なので1つ失敗しても全体は止まらない。
     const [summaryR, entriesR, openingR, todayR] = await Promise.allSettled([
@@ -1245,12 +1241,13 @@ app.get('/api/app-bootstrap', async (c) => {
       )
         .bind(organizationId, `${year}-01-01`)
         .first<{ opening_balance: number }>(),
+      // 本日時点残高は完了済みの全件。予定日が未来でも完了済みなら入出金済みとして含める。
       c.env.DB.prepare(
         `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as balance
          FROM cashflow_entries
-         WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date <= ?`
+         WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1`
       )
-        .bind(organizationId, todayStr)
+        .bind(organizationId)
         .first<{ balance: number }>()
     ]);
 
@@ -3724,6 +3721,7 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     #list-section-body.hide-col-actions [data-list-col="actions"] { display: none !important; }
     .action-row { display: flex; gap: 4px; flex-wrap: nowrap; }
     .actions button, .actions select { padding: 5px 6px; font-size: 11px; min-width: 0; white-space: nowrap; }
+    .actions button:disabled, .actions select:disabled { opacity: .45; cursor: not-allowed; color: var(--muted); }
     .label-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 6px; border: 1px solid rgba(0,0,0,.15); vertical-align: middle; }
     .label-red { background: #ef4444; }
     .label-orange { background: #f97316; }
@@ -3946,6 +3944,25 @@ function renderAppPage(email: string, isAdmin: boolean, organizationId: number) 
     }
     .entry-edit-grid .full {
       grid-column: 1 / -1;
+    }
+    /* 日付入力と「本日」ボタンを横並びにする。.field > input の幅指定が効かなくなるためここで指定する。 */
+    .date-with-today {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      min-width: 0;
+    }
+    .date-with-today > input {
+      flex: 1 1 auto;
+      width: 100%;
+      min-width: 0;
+    }
+    .date-with-today > .date-today-btn {
+      flex: 0 0 auto;
+      padding: 9px 10px;
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
     }
     .entry-edit-actions {
       display: flex;
@@ -4622,8 +4639,11 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
         </div>
         <div class="field">
           <label for="entry-edit-scheduled-date">予定日</label>
-          <input id="entry-edit-scheduled-date" name="scheduledDate" type="date" required />
-          <div class="field-hint">予定日を修正</div>
+          <div class="date-with-today">
+            <input id="entry-edit-scheduled-date" name="scheduledDate" type="date" required />
+            <button id="entry-edit-scheduled-date-today" type="button" class="secondary date-today-btn">本日</button>
+          </div>
+          <div class="field-hint">予定日を修正 /「本日」で今日の日付</div>
         </div>
         <div class="field">
           <label for="entry-edit-actual-date">入出金日</label>
@@ -4777,6 +4797,7 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   const entryEditType = document.getElementById('entry-edit-type');
   const entryEditLabelColor = document.getElementById('entry-edit-label-color');
   const entryEditScheduledDate = document.getElementById('entry-edit-scheduled-date');
+  const entryEditScheduledDateToday = document.getElementById('entry-edit-scheduled-date-today');
   const entryEditActualDate = document.getElementById('entry-edit-actual-date');
   const entryEditCfCategory = document.getElementById('entry-edit-cf-category');
   const entryEditNote = document.getElementById('entry-edit-note');
@@ -6282,8 +6303,15 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     const amount = Number(e.amount);
     const runningClass = entryRunning < 0 ? 'minus' : 'plus';
     const rowClass = Number(e.is_completed) === 1 ? 'completed' : '';
+    const isCompleted = Number(e.is_completed) === 1;
     const actionAttrs = 'data-id="' + e.id + '" ' + (savingReorder ? 'disabled' : '');
     const actionBtn = (attr, label) => '<button type="button" ' + attr + ' ' + actionAttrs + '>' + label + '</button>';
+    // 完了済みの予定は誤操作防止のため「削除」「修正」を押せないようにする。
+    const lockedActionBtn = (attr, label) =>
+      '<button type="button" ' + attr + ' data-id="' + e.id + '"' +
+      (savingReorder || isCompleted ? ' disabled' : '') +
+      (isCompleted ? ' title="完了済みの予定は修正・削除できません。先に「完了済み」を押して未完了に戻してください。"' : '') +
+      '>' + label + '</button>';
     const hasMgmt = String(e.import_management_no || '').trim() !== '';
     const expanded = expandedMgmtIds.has(Number(e.id));
     const toggleLabel = expanded ? '−' : '+';
@@ -6319,9 +6347,9 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
               actionBtn('data-move="up"', '上') +
               actionBtn('data-move="down"', '下') +
               actionBtn('data-move="bottom"', '末尾') +
-              actionBtn('data-delete="1"', '削除') +
-              actionBtn('data-openedit="1"', '修正') +
-              actionBtn('data-complete="1"', Number(e.is_completed) === 1 ? '完了済み' : '完了') +
+              lockedActionBtn('data-delete="1"', '削除') +
+              lockedActionBtn('data-openedit="1"', '修正') +
+              actionBtn('data-complete="1"', isCompleted ? '完了済み' : '完了') +
               '<select data-editcolor="1" ' + actionAttrs + '>' +
               buildLabelColorOptionsHtml(String(e.label_color || 'blue')) +
               '</select>' +
@@ -6597,6 +6625,10 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   async function deleteEntry(id) {
     const target = entries.find((e) => e.id === id);
     if (!target) return;
+    if (Number(target.is_completed) === 1) {
+      showBanner(statusBanner, 'warn', '完了済みの予定は削除できません。先に未完了に戻してください。');
+      return;
+    }
     const confirmed = window.confirm('この予定を削除しますか？\\n' + target.scheduled_date + ' / ' + target.title);
     if (!confirmed) return;
 
@@ -6818,7 +6850,12 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
     }
     if (btn.dataset.openedit) {
       const target = entries.find((e) => e.id === id);
-      if (target) showEntryEditModal(target);
+      if (!target) return;
+      if (Number(target.is_completed) === 1) {
+        showBanner(statusBanner, 'warn', '完了済みの予定は修正できません。先に未完了に戻してください。');
+        return;
+      }
+      showEntryEditModal(target);
       return;
     }
     const dir = String(btn.dataset.move || '');
@@ -6887,6 +6924,12 @@ ${renderCommonHeaderHtml(email, isAdmin, '/app', { showEditModeBtn: true })}
   entryEditType?.addEventListener('change', () => {
     syncEntryEditCfCategoryOptions();
   });
+  entryEditScheduledDateToday?.addEventListener('click', () => {
+    if (!(entryEditScheduledDate instanceof HTMLInputElement)) return;
+    entryEditScheduledDate.value = formatLocalDateIso(new Date());
+    entryEditScheduledDate.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
   entryEditCancel?.addEventListener('click', () => {
     closeEntryEditModal();
   });
@@ -8653,10 +8696,12 @@ function renderCashflowStatementPage(
       const cellClass = isNumber ? `num${value < 0 ? ' neg' : ''}` : 'empty';
       return `<td class="${cellClass}" data-col-key="${escapeHtml(column.key)}">${formatCashflowStatementValue(value)}</td>`;
     }).join('');
+    // 合計列の値は表示中の月範囲に合わせてクライアント側で計算する。
     return `<tr class="${rowClass}" data-row-no="${row.rowNo}">
       <th scope="row" class="sticky-col sticky-label">${label}</th>
       <td class="sticky-col sticky-sub">${subLabel}</td>
       ${cells}
+      <td class="total-col empty">–</td>
     </tr>`;
   }).join('');
   const headerYearCells = displayColumns
@@ -8741,6 +8786,7 @@ function renderCashflowStatementPage(
     .row-subitem .sticky-sub { padding-left:22px; color:#44556b; }
     .row-gap > * { border-top:8px solid #fff; }
     .col-hidden { display:none; }
+    .total-col { min-width:104px; font-weight:700; background:var(--sum); border-left:2px solid #c3cfdc; }
     .status-実績 { background:var(--actual); }
     .status-計画 { background:var(--plan); }
     .status-合計 { background:var(--sum); }
@@ -8832,11 +8878,13 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
             <th class="sticky-col sticky-label">項目</th>
             <th class="sticky-col sticky-sub">補足</th>
             ${headerYearCells}
+            <th class="month-col total-col">合計</th>
           </tr>
           <tr>
             <th class="sticky-col sticky-label">区分</th>
             <th class="sticky-col sticky-sub">内訳</th>
             ${headerStatusCells}
+            <th class="month-col total-col status-合計">表示期間</th>
           </tr>
         </thead>
         <tbody>
@@ -8891,6 +8939,40 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
     return { ok: true, startIndex, endIndex, monthCount: endIndex - startIndex + 1 };
   }
 
+  function parseStatementCellNumber(cell) {
+    const text = (cell.textContent || '').trim();
+    if (text === '' || text === '–') return null;
+    const value = Number(text.replaceAll(',', ''));
+    return Number.isFinite(value) ? value : null;
+  }
+
+  // 前月繰越(6)は期首の値、次月繰越金(59)は期末の値。残高を足し合わせても意味がないため。
+  const OPENING_BALANCE_ROW_NO = 6;
+  const CLOSING_BALANCE_ROW_NO = 59;
+
+  function updateRowTotals() {
+    const rows = statementTableEl?.querySelectorAll('tbody tr[data-row-no]') || [];
+    rows.forEach((row) => {
+      const totalCell = row.querySelector('td.total-col');
+      if (!totalCell) return;
+      const rowNo = Number(row.getAttribute('data-row-no') || '0');
+      const values = Array.from(row.querySelectorAll('td[data-col-key]'))
+        .filter((cell) => !cell.classList.contains('col-hidden'))
+        .map(parseStatementCellNumber)
+        .filter((value) => value !== null);
+      let total = null;
+      if (values.length > 0) {
+        if (rowNo === OPENING_BALANCE_ROW_NO) total = values[0];
+        else if (rowNo === CLOSING_BALANCE_ROW_NO) total = values[values.length - 1];
+        else total = values.reduce((sum, value) => sum + value, 0);
+      }
+      totalCell.textContent = total === null ? '–' : new Intl.NumberFormat('ja-JP').format(total);
+      totalCell.classList.toggle('empty', total === null);
+      totalCell.classList.toggle('num', total !== null);
+      totalCell.classList.toggle('neg', total !== null && total < 0);
+    });
+  }
+
   function applySelectedRange() {
     const result = getSelectedMonthRange();
     if (!result.ok) {
@@ -8906,6 +8988,7 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
       const key = cell.getAttribute('data-col-key') || '';
       cell.classList.toggle('col-hidden', !visibleColumnKeys.has(key));
     });
+    updateRowTotals();
     syncStatementScrollMetrics();
     if (tableWrapEl) tableWrapEl.scrollLeft = 0;
     if (topScrollEl) topScrollEl.scrollLeft = 0;
@@ -9212,6 +9295,16 @@ ${embedded ? '' : renderCommonHeaderHtml(email, isAdmin, '/cashflow-statement')}
         const text = cell.textContent || '';
         const monthCellIndex = cellIndex - 2;
         const monthColumnNumber = cellIndex + 1;
+        if (rowNo > 0 && cell.classList.contains('total-col')) {
+          const cellText = text.trim();
+          const firstMonthColumn = toExcelColumnLabel(3);
+          const lastMonthColumn = toExcelColumnLabel(monthColumnNumber - 1);
+          if (cellText === '' || cellText === '–' || monthColumnNumber <= 3) return '<c/>';
+          const numericValue = Number(cellText.replaceAll(',', ''));
+          if (rowNo === OPENING_BALANCE_ROW_NO) return xmlFormulaCell(firstMonthColumn + sheetRowNo, numericValue);
+          if (rowNo === CLOSING_BALANCE_ROW_NO) return xmlFormulaCell(lastMonthColumn + sheetRowNo, numericValue);
+          return xmlFormulaCell('SUM(' + firstMonthColumn + sheetRowNo + ':' + lastMonthColumn + sheetRowNo + ')', numericValue);
+        }
         if (rowNo > 0 && monthCellIndex >= 0) {
           const cellText = text.trim();
           const numericValue = cellText === '' || cellText === '–' ? 0 : Number(cellText.replaceAll(',', ''));

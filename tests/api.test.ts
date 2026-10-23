@@ -318,6 +318,44 @@ describe('entries api', () => {
     }
   });
 
+  it('includes completed entries in today balance regardless of scheduled date', async () => {
+    const cookie = await createAuthedCookie();
+    const jstDateIso = (offsetDays: number) =>
+      new Date(Date.now() + 9 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const today = jstDateIso(0);
+    await createEntry(cookie, { title: 'Done Past', amount: 1000, type: 'income', scheduledDate: jstDateIso(-3) });
+    // 予定日より前倒しで支払って完了にしたケース（予定日は未来のまま）。
+    await createEntry(cookie, { title: 'Done Future', amount: 300, type: 'expense', scheduledDate: jstDateIso(2) });
+    await createEntry(cookie, { title: 'Open Past', amount: 5000, type: 'income', scheduledDate: jstDateIso(-1) });
+
+    const ids: number[] = [];
+    for (const year of new Set([jstDateIso(-3), jstDateIso(2)].map((d) => d.slice(0, 4)))) {
+      const listed = await fetchApp(`/api/entries?year=${year}`, { headers: { cookie } });
+      const listedPayload = await listed.json<{ entries: Array<{ id: number; title: string }> }>();
+      ids.push(...listedPayload.entries.filter((e) => e.title === 'Done Past' || e.title === 'Done Future').map((e) => e.id));
+    }
+    expect(ids).toHaveLength(2);
+
+    const completeRes = await fetchApp('/api/entries/bulk', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ ids, action: 'set_completed', isCompleted: true })
+    });
+    expect(completeRes.status).toBe(200);
+
+    const todayRes = await fetchApp('/api/today-balance', { headers: { cookie } });
+    expect(todayRes.status).toBe(200);
+    expect(await todayRes.json()).toEqual({ todayBalance: 700 });
+
+    const bootstrapRes = await fetchApp(
+      `/api/app-bootstrap?year=${today.slice(0, 4)}&month=${today.slice(0, 7)}`,
+      { headers: { cookie } }
+    );
+    expect(bootstrapRes.status).toBe(200);
+    const bootstrapPayload = await bootstrapRes.json<{ todayBalance: number }>();
+    expect(bootstrapPayload.todayBalance).toBe(700);
+  });
+
   it('lists completed annual entries for both income and expense', async () => {
     const cookie = await createAuthedCookie();
     await createEntry(cookie, {
