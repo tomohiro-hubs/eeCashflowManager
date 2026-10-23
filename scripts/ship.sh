@@ -87,7 +87,7 @@ else
   fi
   git status --short
   if confirm "② 上記の変更をコミットしますか？"; then
-    git commit -m "$MSG" -m "" -m "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+    git commit -m "$MSG" -m "" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     echo "✅ コミット完了"
   else
     echo "中止しました。"; exit 1
