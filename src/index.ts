@@ -1177,15 +1177,13 @@ app.get('/api/today-balance', async (c) => {
   if (auth instanceof Response) return auth;
   const { organizationId } = auth;
 
-  const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
-  const todayStr = jstNow.toISOString().slice(0, 10);
-
+  // 完了済みは実際に入出金済みなので、予定日が未来（前倒しで支払った等）でも残高に含める。
   const row = await c.env.DB.prepare(
     `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as balance
      FROM cashflow_entries
-     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date <= ?`
+     WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1`
   )
-    .bind(organizationId, todayStr)
+    .bind(organizationId)
     .first<{ balance: number }>();
 
   return c.json({ todayBalance: Number(row?.balance ?? 0) });
@@ -1211,8 +1209,6 @@ app.get('/api/app-bootstrap', async (c) => {
 
   try {
     const { startDate, endDate } = getYearDateRange(year);
-    const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
-    const todayStr = jstNow.toISOString().slice(0, 10);
 
     // 4クエリを同時に投げる。allSettled なので1つ失敗しても全体は止まらない。
     const [summaryR, entriesR, openingR, todayR] = await Promise.allSettled([
@@ -1245,12 +1241,13 @@ app.get('/api/app-bootstrap', async (c) => {
       )
         .bind(organizationId, `${year}-01-01`)
         .first<{ opening_balance: number }>(),
+      // 本日時点残高は完了済みの全件。予定日が未来でも完了済みなら入出金済みとして含める。
       c.env.DB.prepare(
         `SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0) as balance
          FROM cashflow_entries
-         WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1 AND scheduled_date <= ?`
+         WHERE organization_id = ? AND deleted_at IS NULL AND is_completed = 1`
       )
-        .bind(organizationId, todayStr)
+        .bind(organizationId)
         .first<{ balance: number }>()
     ]);
 
