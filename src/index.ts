@@ -11124,4 +11124,11 @@ export async function scheduled(_event: ScheduledEvent, env: Env, _ctx: Executio
   }
 }
 
-export default app;
+// Workers は default export の fetch と scheduled を呼ぶ。Hono の app だけを default にしていたため
+// scheduled が呼ばれず、定期バックアップが一度も動いていなかった（2026-10-27 に判明）。
+// テストは default の request（app.request）を使うので、それも残す。
+export default {
+  fetch: app.fetch,
+  request: app.request,
+  scheduled,
+};
